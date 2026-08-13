@@ -1,0 +1,21 @@
+# Optional dependencies for the non-default backends. The base app
+# (requirements.txt) runs with the heuristic embedding + in-memory catalog and
+# needs NONE of these.
+
+# --- EMBEDDING_BACKEND=clip (local, offline real embeddings) ---
+# Install the CPU build of torch on machines without a GPU:
+#   pip install torch --index-url https://download.pytorch.org/whl/cpu
+torch>=2.2
+open_clip_torch>=2.24
+# Makes model-weight downloads trust the OS cert store — needed on networks that
+# intercept TLS (corporate proxy / AV). Harmless elsewhere.
+truststore>=0.9
+
+# --- EMBEDDING_BACKEND=vertex (Google Vertex AI Multimodal Embeddings) ---
+google-cloud-aiplatform>=1.60
+
+# --- DATA_BACKEND=sql (Cloud SQL / Postgres) ---
+SQLAlchemy>=2.0
+psycopg[binary]>=3.1
+# For Cloud SQL in production you may also want:
+# cloud-sql-python-connector[psycopg]>=1.7

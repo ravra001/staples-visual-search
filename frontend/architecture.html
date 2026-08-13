@@ -1,0 +1,167 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Architecture | Staples Visual Search</title>
+<link rel="stylesheet" href="/assets/style.css" />
+</head>
+<body>
+
+<div id="site-header"></div>
+
+<main class="arch-page">
+
+  <header class="arch-hero">
+    <span class="hero-eyebrow">System Design</span>
+    <h1>Visual Search — Architecture</h1>
+    <p>How the "search by photo" feature is built today (runs fully on a laptop, zero cloud)
+       and how the exact same code maps onto Google Cloud for production. Every box in the
+       local diagram has a one-to-one swap on the GCP side.</p>
+    <div class="arch-legend">
+      <span><span class="dot dot-client"></span> Client</span>
+      <span><span class="dot dot-app"></span> Application</span>
+      <span><span class="dot dot-ml"></span> Embedding / ML</span>
+      <span><span class="dot dot-data"></span> Data &amp; storage</span>
+      <span><span class="dot dot-infra"></span> Infra / platform</span>
+    </div>
+  </header>
+
+  <!-- ============ REQUEST FLOW ============ -->
+  <section class="arch-section">
+    <h2>Request flow — one photo search</h2>
+    <p class="arch-lead">The pipeline is identical in both environments; only the
+       <em>providers</em> behind steps 3–5 change.</p>
+    <ol class="flow-strip">
+      <li><span class="flow-num">1</span><b>Upload</b><span>User picks a photo via the camera icon in the search bar.</span></li>
+      <li><span class="flow-num">2</span><b>POST</b><span><code>/api/visual-search</code> sends the image bytes to the backend.</span></li>
+      <li><span class="flow-num">3</span><b>Embed</b><span>Image → feature vector (heuristic, local CLIP, or Vertex AI).</span></li>
+      <li><span class="flow-num">4</span><b>Rank</b><span>Cosine similarity vs the pre-embedded catalog index. Top-K.</span></li>
+      <li><span class="flow-num">5</span><b>Hydrate</b><span>Fetch product rows for the winning SKUs from the catalog store.</span></li>
+      <li><span class="flow-num">6</span><b>Render</b><span>Ranked matches drawn with the same product-tile component.</span></li>
+    </ol>
+  </section>
+
+  <!-- ============ TWO ARCHITECTURES ============ -->
+  <section class="arch-section">
+    <h2>Two deployments, one codebase</h2>
+    <div class="arch-grid">
+
+      <!-- LOCAL -->
+      <div class="arch-col">
+        <div class="arch-col-head local">
+          <h3>On-Prem / Local</h3>
+          <span class="arch-tag">Current · zero cloud · runs on a laptop</span>
+        </div>
+        <div class="arch-diagram">
+          <div class="tier">
+            <div class="node client"><b>Browser</b><small>index / category / product / visual-search .html · vanilla JS, no build step</small></div>
+          </div>
+          <div class="flow-arrow">HTTP · localhost:8000</div>
+          <div class="tier">
+            <div class="node app wide"><b>FastAPI + Uvicorn</b><small>single process — serves static frontend <em>and</em> JSON API<br/>/api/products · /api/search · /api/visual-search · /api/config</small></div>
+          </div>
+          <div class="flow-arrow">in-process calls</div>
+          <div class="tier three">
+            <div class="node ml"><b>Embedding</b><small>EMBEDDING_BACKEND<br/>= heuristic (NumPy/PIL)<br/>or clip (local OpenCLIP)</small></div>
+            <div class="node data"><b>Catalog</b><small>DATA_BACKEND = memory<br/>Python list in<br/>products_data.py</small></div>
+            <div class="node data"><b>Images</b><small>local filesystem<br/>static/images/products/<br/>&lt;SKU&gt;.png</small></div>
+          </div>
+          <div class="tier">
+            <div class="node infra wide"><b>Catalog index</b><small>every product image embedded at startup → in-memory vectors · brute-force cosine</small></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- GCP -->
+      <div class="arch-col">
+        <div class="arch-col-head gcp">
+          <h3>Google Cloud</h3>
+          <span class="arch-tag">Target · same code · flip env vars + creds</span>
+        </div>
+        <div class="arch-diagram">
+          <div class="tier">
+            <div class="node client"><b>Browser</b><small>identical frontend — unchanged</small></div>
+          </div>
+          <div class="flow-arrow">HTTPS</div>
+          <div class="tier">
+            <div class="node infra wide"><b>Cloud Load Balancing + Cloud CDN</b><small>TLS, global edge, caches product images &amp; static assets</small></div>
+          </div>
+          <div class="flow-arrow">routed request</div>
+          <div class="tier">
+            <div class="node app wide"><b>Cloud Run</b><small>FastAPI in a container · autoscaling · stateless<br/>(image from Artifact Registry, built by Cloud Build)</small></div>
+          </div>
+          <div class="flow-arrow">service calls</div>
+          <div class="tier three">
+            <div class="node ml"><b>Vertex AI</b><small>Multimodal Embeddings<br/>multimodalembedding@001<br/>→ 1408-dim vector</small></div>
+            <div class="node data"><b>Cloud SQL</b><small>DATA_BACKEND = sql<br/>Postgres · products table<br/>(SQLAlchemy)</small></div>
+            <div class="node data"><b>Cloud Storage</b><small>product images bucket<br/>served via Cloud CDN</small></div>
+          </div>
+          <div class="tier">
+            <div class="node infra wide"><b>Catalog index</b><small>brute-force cosine over cached vectors — or Vertex AI Vector Search once the catalog is large</small></div>
+          </div>
+        </div>
+      </div>
+
+    </div>
+  </section>
+
+  <!-- ============ SWAP MAP ============ -->
+  <section class="arch-section">
+    <h2>Swap-point map</h2>
+    <p class="arch-lead">Each concern is isolated behind one interface, so migration is a
+       configuration change — not a rewrite. <code>main.py</code> and the entire frontend are
+       byte-for-byte identical across both columns.</p>
+    <div class="table-scroll">
+      <table class="arch-table">
+        <thead><tr><th>Concern</th><th>On-Prem / Local</th><th>Google Cloud</th><th>Controlled by</th></tr></thead>
+        <tbody>
+          <tr><td>Compute</td><td>Uvicorn process</td><td>Cloud Run (container, autoscaled)</td><td>deploy target</td></tr>
+          <tr><td>Embedding model</td><td>heuristic · local CLIP</td><td>Vertex AI Multimodal Embeddings</td><td><code>EMBEDDING_BACKEND</code></td></tr>
+          <tr><td>Product catalog</td><td>in-memory Python list</td><td>Cloud SQL (Postgres)</td><td><code>DATA_BACKEND</code> + <code>DATABASE_URL</code></td></tr>
+          <tr><td>Product images</td><td>local filesystem</td><td>Cloud Storage + Cloud CDN</td><td>static mount → bucket</td></tr>
+          <tr><td>Vector ranking</td><td>brute-force cosine (in-memory)</td><td>brute-force → Vertex AI Vector Search at scale</td><td>catalog size</td></tr>
+          <tr><td>Secrets / config</td><td>environment variables</td><td>Secret Manager + env vars</td><td>runtime env</td></tr>
+          <tr><td>CI / build</td><td>local <code>pip</code></td><td>Cloud Build → Artifact Registry</td><td>pipeline</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <!-- ============ SCALE NOTES ============ -->
+  <section class="arch-section">
+    <h2>Notes on scale</h2>
+    <div class="note-cards">
+      <div class="note-card">
+        <h4>Precomputed index</h4>
+        <p>Catalog embeddings are computed once and cached, not on every request. At tens of
+           thousands of SKUs this becomes a one-time offline build step (cache vectors to disk /
+           a table), so server startup stays instant.</p>
+      </div>
+      <div class="note-card">
+        <h4>Brute-force is fine — until it isn't</h4>
+        <p>Cosine over an in-memory matrix is sub-millisecond for thousands of SKUs. Only when the
+           catalog reaches large scale do you graduate to Vertex AI Vector Search / Matching Engine —
+           the ranking interface doesn't change.</p>
+      </div>
+      <div class="note-card">
+        <h4>Dimension-agnostic</h4>
+        <p>59-dim heuristic, 512-dim CLIP, or 1408-dim Vertex vectors all flow through the same
+           <code>cosine_similarity()</code> / <code>top_k_matches()</code> — swapping the model
+           changes nothing downstream.</p>
+      </div>
+    </div>
+  </section>
+
+</main>
+
+<div id="site-footer"></div>
+
+<script src="/assets/app.js"></script>
+<script>
+  renderSiteChrome();
+  wireVisualSearch('camera-btn', 'visual-search-input');
+  wireTextSearch();
+</script>
+</body>
+</html>

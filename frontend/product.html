@@ -1,0 +1,32 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Product | Staples</title>
+<link rel="stylesheet" href="/assets/style.css" />
+</head>
+<body>
+
+<div id="site-header"></div>
+
+<main class="listing-page">
+  <div id="product-detail"></div>
+
+  <section class="rail-section">
+    <h2>You may also like</h2>
+    <div id="related-rail" class="product-rail"></div>
+  </section>
+</main>
+
+<div id="site-footer"></div>
+
+<script src="/assets/app.js"></script>
+<script>
+  renderSiteChrome();
+  renderProductDetail('product-detail');
+  wireVisualSearch('camera-btn', 'visual-search-input');
+  wireTextSearch();
+</script>
+</body>
+</html>

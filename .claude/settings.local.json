@@ -1,0 +1,10 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(pip show *)",
+      "Bash(python -m uvicorn main:app --port 8000)",
+      "Bash(curl -s -o /dev/null -w \"%{http_code}\" http://localhost:8000/)",
+      "Bash(curl -s -o /dev/null -w \"%{http_code}\" http://localhost:8000/assets/app.js)"
+    ]
+  }
+}
