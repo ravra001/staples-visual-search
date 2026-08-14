@@ -71,6 +71,16 @@ def get_product_by_sku(sku):
         return p.as_dict() if p else None
 
 
+def get_products_by_skus(skus):
+    """Batch fetch — one `WHERE sku IN (...)` query (avoids N+1). {sku: product}."""
+    skus = list(skus)
+    if not skus:
+        return {}
+    with SessionLocal() as s:
+        rows = s.query(Product).filter(Product.sku.in_(skus)).all()
+        return {p.sku: p.as_dict() for p in rows}
+
+
 def get_products_by_category(category):
     with SessionLocal() as s:
         rows = s.query(Product).filter(Product.category == category).all()

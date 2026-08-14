@@ -14,27 +14,37 @@ from contextlib import asynccontextmanager
 
 import numpy as np
 import config
-from fastapi import FastAPI, File, HTTPException, UploadFile
+from fastapi import FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
+from starlette.concurrency import run_in_threadpool
 
 from products_data import (
     DATA_BACKEND,
     get_all_products,
     get_product_by_sku,
+    get_products_by_skus,
     get_products_by_category,
     search_products,
 )
-from embeddings import BACKEND as EMBEDDING_BACKEND, embed_image, top_k_matches
+from embeddings import BACKEND as EMBEDDING_BACKEND, embed_image
 
 BASE_DIR = os.path.dirname(__file__)
 IMAGES_DIR = os.path.join(BASE_DIR, "static", "images", "products")
 CACHE_DIR = os.path.join(BASE_DIR, "data")
 FRONTEND_DIR = os.path.join(os.path.dirname(BASE_DIR), "frontend")
 
-# ---- catalog embedding cache (computed once, then persisted to disk) ----
-_catalog_vectors = {}
+# ---- catalog vector index (loaded once at startup) ----
+# The index is held as ONE contiguous, L2-normalized matrix + parallel arrays,
+# so a query ranks the whole catalog with a single matmul (see _rank) instead of
+# a Python loop. Vectors are normalized once here, never per request.
+_index_skus = np.empty(0, dtype=object)   # (N,)  sku per row
+_index_matrix = np.empty((0, 0), np.float32)  # (N, D) L2-normalized
+_index_cats = np.empty(0, dtype=object)   # (N,)  category per row
+_sku_category = {}                        # sku -> category
+CONF_THRESHOLD = config.CONF_THRESHOLD    # % — only auto-scope above this confidence
+_SOFTMAX_T = config.SOFTMAX_T             # temperature: sharpens cosine sims into probabilities
 
 
 def _image_path(p):
@@ -43,92 +53,124 @@ def _image_path(p):
 
 
 def _cache_path():
-    # one cache per embedding backend (vectors differ by model/dimensionality)
     return os.path.join(CACHE_DIR, f"index_{EMBEDDING_BACKEND}.npz")
 
 
+def _normalize_rows(m):
+    m = np.asarray(m, dtype=np.float32)
+    norms = np.linalg.norm(m, axis=1, keepdims=True)
+    norms[norms == 0] = 1.0
+    return m / norms
+
+
 def _build_catalog_index():
+    global _index_skus, _index_matrix, _index_cats
     start = time.time()
     products = [p for p in get_all_products() if os.path.exists(_image_path(p))]
     want = {p["sku"] for p in products}
+    cat_of = {p["sku"]: p["category"] for p in get_all_products()}
+    fp = config.index_fingerprint()
 
-    # Fast path: load a prebuilt index (see build_index.py) if it covers the catalog.
+    skus = vecs = None
     cache = _cache_path()
     if os.path.exists(cache):
         data = np.load(cache, allow_pickle=True)
-        skus = list(data["skus"])
-        vecs = data["vecs"]  # read the array ONCE (indexing NpzFile per-item re-reads it)
-        cached = {s: vecs[i] for i, s in enumerate(skus)}
-        if want.issubset(cached):
-            for s in want:
-                _catalog_vectors[s] = cached[s]
-            print(f"[startup] backends: embedding={EMBEDDING_BACKEND}, data={DATA_BACKEND} — "
-                  f"loaded {len(_catalog_vectors)} vectors from cache in {time.time() - start:.2f}s")
-            return
+        cached_fp = str(data["fingerprint"][0]) if "fingerprint" in data else None
+        cached_skus = list(data["skus"])
+        if cached_fp is not None and cached_fp != fp:
+            # A model/pretrained change since this cache was built — refuse it
+            # rather than rank against vectors from a different model.
+            print(f"[startup] WARNING: index cache {os.path.basename(cache)} was built by "
+                  f"{cached_fp!r}, but this process is {fp!r}. Ignoring stale cache.")
+        elif want.issubset(set(cached_skus)):
+            skus, vecs = cached_skus, data["vecs"]
+            print(f"[startup] loaded {len(skus)} vectors from cache ({fp}) in {time.time() - start:.2f}s")
 
-    # Slow path: embed every catalog image, then persist for next boot.
-    skus, vecs = [], []
-    for p in products:
-        with open(_image_path(p), "rb") as f:
-            v = embed_image(f.read())
-        _catalog_vectors[p["sku"]] = v
-        skus.append(p["sku"])
-        vecs.append(v)
-    if vecs:
-        os.makedirs(CACHE_DIR, exist_ok=True)
-        np.savez(cache, skus=np.array(skus, dtype=object), vecs=np.array(vecs, dtype=np.float32))
+    if skus is None:
+        # Cache miss / stale / partial. In production this must not happen — a
+        # cold start firing thousands of embed calls is a cost/latency trap.
+        if config.REQUIRE_PREBUILT_INDEX:
+            raise RuntimeError(
+                f"No valid prebuilt index for {fp} at {cache} and index.require_prebuilt=true. "
+                f"Build it offline with build_index.py and ship it."
+            )
+        skus, out = [], []
+        for p in products:
+            with open(_image_path(p), "rb") as f:
+                out.append(embed_image(f.read()))
+            skus.append(p["sku"])
+        vecs = np.array(out, dtype=np.float32) if out else np.empty((0, 0), np.float32)
+        if len(skus):
+            os.makedirs(CACHE_DIR, exist_ok=True)
+            np.savez(cache, skus=np.array(skus, dtype=object), vecs=vecs,
+                     fingerprint=np.array([fp], dtype=object))
+        print(f"[startup] embedded {len(skus)} images ({fp}) in {time.time() - start:.2f}s (cached)")
+
+    _index_skus = np.array(skus, dtype=object)
+    _index_matrix = _normalize_rows(vecs) if len(skus) else np.empty((0, 0), np.float32)
+    _index_cats = np.array([cat_of.get(s, "") for s in skus], dtype=object)
+    _sku_category.update({s: cat_of.get(s, "") for s in skus})
     print(f"[startup] backends: embedding={EMBEDDING_BACKEND}, data={DATA_BACKEND} — "
-          f"embedded {len(_catalog_vectors)} catalog images in {time.time() - start:.2f}s (cached)")
+          f"index ready: {_index_matrix.shape}")
 
 
 # ---- soft category classifier (nearest-centroid over the catalog vectors) ----
-# Reuses the embeddings we already cache: each category's centroid is the mean of
-# its product vectors. A query is classified by its closest centroid. Used to
-# *softly* scope visual search to a category when we're confident — never a hard
-# gate (see visual_search: low confidence falls back to searching everything).
-_sku_category = {}          # sku -> category
-_category_centroids = {}    # category -> unit-norm mean vector
-CONF_THRESHOLD = config.CONF_THRESHOLD   # % — only auto-scope above this confidence
-_SOFTMAX_T = config.SOFTMAX_T            # temperature: sharpens cosine sims into probabilities
+# Each category's centroid is the mean of its (normalized) product vectors. A
+# query is classified by its closest centroid. Used to *softly* scope visual
+# search when confident — never a hard gate (low confidence searches everything).
+_centroid_cats = np.empty(0, dtype=object)     # (C,) category labels
+_centroid_matrix = np.empty((0, 0), np.float32)  # (C, D) L2-normalized centroids
 
 
 def _build_category_centroids():
-    from collections import defaultdict
-    cat_of = {p["sku"]: p["category"] for p in get_all_products()}
-    groups = defaultdict(list)
-    for sku, vec in _catalog_vectors.items():
-        c = cat_of.get(sku)
-        if not c:
-            continue
-        _sku_category[sku] = c
-        groups[c].append(vec)
-    for c, vecs in groups.items():
-        m = np.mean(np.stack(vecs), axis=0)
-        n = np.linalg.norm(m)
-        _category_centroids[c] = (m / n) if n > 0 else m
-    print(f"[startup] built {len(_category_centroids)} category centroids for the soft classifier")
+    global _centroid_cats, _centroid_matrix
+    if _index_matrix.size == 0:
+        return
+    cats = sorted(set(_index_cats.tolist()) - {""})
+    rows = []
+    for c in cats:
+        mask = _index_cats == c
+        rows.append(_index_matrix[mask].mean(axis=0))
+    _centroid_cats = np.array(cats, dtype=object)
+    _centroid_matrix = _normalize_rows(np.array(rows, dtype=np.float32))
+    print(f"[startup] built {len(cats)} category centroids for the soft classifier")
 
 
-def _classify(query_vec):
-    """Return {category, confidence(%), ranking:[(cat,%)]} or None if no centroids."""
-    if not _category_centroids:
+def _classify(qn_vec):
+    """qn_vec must be L2-normalized. Returns {category, confidence(%), ranking}."""
+    if _centroid_matrix.size == 0:
         return None
-    cats = list(_category_centroids)
-    qn = np.linalg.norm(query_vec) + 1e-8
-    sims = np.array([
-        float(np.dot(query_vec, _category_centroids[c]) / (qn * (np.linalg.norm(_category_centroids[c]) + 1e-8)))
-        for c in cats
-    ])
+    sims = _centroid_matrix @ qn_vec           # (C,) cosine (both normalized)
     z = sims / _SOFTMAX_T
     z -= z.max()
     e = np.exp(z)
     probs = e / e.sum()
     order = np.argsort(probs)[::-1]
     return {
-        "category": cats[order[0]],
+        "category": str(_centroid_cats[order[0]]),
         "confidence": round(float(probs[order[0]]) * 100, 1),
-        "ranking": [(cats[i], round(float(probs[i]) * 100, 1)) for i in order[:3]],
+        "ranking": [(str(_centroid_cats[i]), round(float(probs[i]) * 100, 1)) for i in order[:3]],
     }
+
+
+def _rank(qn_vec, k, category=None):
+    """Vectorized top-k over the (optionally category-scoped) index.
+    qn_vec must be L2-normalized. Returns [(sku, score), ...] desc."""
+    if _index_matrix.size == 0:
+        return []
+    if category is not None:
+        mask = _index_cats == category
+        M = _index_matrix[mask]
+        skus = _index_skus[mask]
+    else:
+        M, skus = _index_matrix, _index_skus
+    if M.shape[0] == 0:
+        return []
+    scores = M @ qn_vec                        # (n,) cosine similarities
+    k = min(k, scores.shape[0])
+    top = np.argpartition(-scores, k - 1)[:k]  # unordered top-k
+    top = top[np.argsort(-scores[top])]        # order them
+    return [(str(skus[i]), float(scores[i])) for i in top]
 
 
 @asynccontextmanager
@@ -142,7 +184,7 @@ app = FastAPI(title="Staples Visual Search Demo", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=config.CORS_ORIGINS,   # "*" for local demo; lock down for public deploy
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -171,10 +213,20 @@ def _serialize(p):
 
 # ---------- API ----------
 
+def _page(items, limit, offset):
+    """Slice a result list into a page and report the true total."""
+    total = len(items)
+    offset = max(offset, 0)
+    window = items[offset: offset + limit] if limit is not None else items[offset:]
+    return total, window
+
+
 @app.get("/api/products")
-def list_products(category: str | None = None):
+def list_products(category: str | None = None, limit: int | None = config.PAGE_SIZE, offset: int = 0):
     items = get_products_by_category(category) if category else get_all_products()
-    return {"count": len(items), "items": [_serialize(p) for p in items]}
+    total, window = _page(items, limit, offset)
+    return {"count": total, "offset": offset, "limit": limit,
+            "items": [_serialize(p) for p in window]}
 
 
 @app.get("/api/products/{sku}")
@@ -192,9 +244,11 @@ def list_categories():
 
 
 @app.get("/api/search")
-def text_search(q: str = ""):
+def text_search(q: str = "", limit: int | None = config.PAGE_SIZE, offset: int = 0):
     items = search_products(q)
-    return {"count": len(items), "query": q, "items": [_serialize(p) for p in items]}
+    total, window = _page(items, limit, offset)
+    return {"count": total, "query": q, "offset": offset, "limit": limit,
+            "items": [_serialize(p) for p in window]}
 
 
 @app.get("/api/config")
@@ -203,8 +257,32 @@ def app_config():
     return {"embedding_backend": EMBEDDING_BACKEND, "data_backend": DATA_BACKEND}
 
 
+_MAX_UPLOAD_BYTES = int(config.MAX_UPLOAD_MB * 1024 * 1024)
+
+
+def _do_visual_search(image_bytes, top_k, scope):
+    """CPU-bound work — embed + classify + rank. Runs in a threadpool so it never
+    blocks the event loop (see the endpoint)."""
+    query_vec = embed_image(image_bytes)
+    qn = query_vec / (np.linalg.norm(query_vec) + 1e-8)   # normalize the query ONCE
+
+    cls = _classify(qn) if config.CLASSIFIER_ENABLED else None
+    category, scoped = None, False
+    if cls and (scope == "force" or (scope == "auto" and cls["confidence"] >= CONF_THRESHOLD)):
+        category, scoped = cls["category"], True
+
+    matches = _rank(qn, top_k, category=category)
+    if scoped and not matches:                # empty scoped result → fall back to full search
+        category, scoped = None, False
+        matches = _rank(qn, top_k)
+
+    searched = int((_index_cats == category).sum()) if category is not None else int(_index_skus.shape[0])
+    return {"cls": cls, "scoped": scoped, "matches": matches, "searched": searched}
+
+
 @app.post("/api/visual-search")
-async def visual_search(file: UploadFile = File(...), top_k: int = config.TOP_K, scope: str = "auto"):
+async def visual_search(request: Request, file: UploadFile = File(...),
+                        top_k: int = config.TOP_K, scope: str = "auto"):
     """Visual search with soft category scoping.
 
     scope: "auto"  (default) — scope to the predicted category only when confident
@@ -214,32 +292,27 @@ async def visual_search(file: UploadFile = File(...), top_k: int = config.TOP_K,
     if not file.content_type or not file.content_type.startswith("image/"):
         raise HTTPException(400, "Please upload an image file")
 
-    image_bytes = await file.read()
+    # Reject clearly-oversized uploads up front (before reading the body).
+    clen = request.headers.get("content-length")
+    if clen and int(clen) > _MAX_UPLOAD_BYTES:
+        raise HTTPException(413, f"Image too large (limit {config.MAX_UPLOAD_MB:g} MB)")
+
+    image_bytes = await file.read(_MAX_UPLOAD_BYTES + 1)   # bounded read (backstop; don't buffer huge uploads)
     if len(image_bytes) == 0:
         raise HTTPException(400, "Empty file")
+    if len(image_bytes) > _MAX_UPLOAD_BYTES:
+        raise HTTPException(413, f"Image too large (limit {config.MAX_UPLOAD_MB:g} MB)")
 
     try:
-        query_vec = embed_image(image_bytes)
+        r = await run_in_threadpool(_do_visual_search, image_bytes, top_k, scope)
     except Exception as e:
         raise HTTPException(400, f"Could not process image: {e}")
 
-    # classify the uploaded photo, then decide whether to scope the search
-    cls = _classify(query_vec) if config.CLASSIFIER_ENABLED else None
-    catalog = list(_catalog_vectors.items())
-    scoped = False
-    if cls:
-        confident = cls["confidence"] >= CONF_THRESHOLD
-        if scope == "force" or (scope == "auto" and confident):
-            subset = [(s, v) for s, v in catalog if _sku_category.get(s) == cls["category"]]
-            if subset:
-                catalog = subset
-                scoped = True
-
-    matches = top_k_matches(query_vec, catalog, k=top_k)
-
+    cls, matches = r["cls"], r["matches"]
+    by_sku = get_products_by_skus([sku for sku, _ in matches])   # single batch fetch (no N+1)
     results = []
     for sku, score in matches:
-        p = get_product_by_sku(sku)
+        p = by_sku.get(sku)
         if p:
             item = _serialize(p)
             item["match_score"] = round(score * 100, 1)
@@ -251,8 +324,8 @@ async def visual_search(file: UploadFile = File(...), top_k: int = config.TOP_K,
         "predicted_category": cls["category"] if cls else None,
         "confidence": cls["confidence"] if cls else None,
         "category_ranking": cls["ranking"] if cls else None,
-        "scoped": scoped,
-        "searched": len(catalog),  # how many vectors were actually ranked
+        "scoped": r["scoped"],
+        "searched": r["searched"],   # how many vectors were actually ranked
     }
 
 

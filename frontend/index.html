@@ -45,7 +45,7 @@
   </section>
 
   <section class="rail-section">
-    <h2>Top chair deals</h2>
+    <h2>Popular right now</h2>
     <div id="chairs-rail" class="product-rail"></div>
   </section>
 </main>
@@ -59,8 +59,8 @@
   renderSiteChrome();
   renderSampleProducts('featured-grid');
   renderCategoryGrid('category-grid');
-  renderProductRail('deals-rail', { limit: 6 });
-  renderProductRail('chairs-rail', { category: 'chair' });
+  renderProductRail('deals-rail', { limit: 6, offset: 0 });
+  renderProductRail('chairs-rail', { limit: 6, offset: 6 });
   wireVisualSearch('camera-btn', 'visual-search-input');
   wireVisualSearch('hero-camera-btn', 'visual-search-input-hero');
   wireTextSearch();

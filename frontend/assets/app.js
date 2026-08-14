@@ -335,6 +335,8 @@ function productCardHTML(p, opts = {}) {
 
 function wireProductCardInteractions(container) {
   container.querySelectorAll(".product-card").forEach(card => {
+    if (card.dataset.wired) return;   // skip already-wired cards (e.g. "Load more" appends)
+    card.dataset.wired = "1";
     const qtyVal = card.querySelector(".qty-val");
     let qty = 1;
     card.querySelector(".qty-inc").addEventListener("click", () => {
@@ -352,55 +354,84 @@ function wireProductCardInteractions(container) {
   });
 }
 
-async function renderProductRail(elId, { category, limit } = {}) {
+async function renderProductRail(elId, { category, limit = 12, offset = 0 } = {}) {
   const el = document.getElementById(elId);
   if (!el) return;
   el.innerHTML = `<div class="state-msg"><div class="spinner"></div>Loading…</div>`;
-  const url = category ? `${API_BASE}/api/products?category=${encodeURIComponent(category)}` : `${API_BASE}/api/products`;
+  const q = (cat, off) => `${API_BASE}/api/products?${cat ? `category=${encodeURIComponent(cat)}&` : ""}limit=${limit}&offset=${off}`;
   try {
-    const res = await fetch(url);
+    let res = await fetch(q(category, offset));
     if (!res.ok) throw new Error("Could not load products");
-    const data = await res.json();
-    let items = data.items;
-    if (limit) items = items.slice(0, limit);
-    el.innerHTML = items.map(p => productCardHTML(p)).join("");
+    let data = await res.json();
+    // Fall back to general products if the given category isn't in this catalog
+    // (e.g. "chair" vs "chairs" across the demo and 10k catalogs).
+    if (category && data.count === 0) { res = await fetch(q(null, offset)); data = await res.json(); }
+    el.innerHTML = data.items.map(p => productCardHTML(p)).join("");
     wireProductCardInteractions(el);
   } catch (e) {
     el.innerHTML = `<div class="state-msg">${e.message}. Please refresh.</div>`;
   }
 }
 
-// Drives the listing page for either a category OR a text-search query.
+// Drives the listing page for either a category OR a text-search query, with
+// server-side pagination + a "Load more" button (never fetches the whole catalog).
+const LISTING_PAGE_SIZE = 48;
+let _listing = null;   // { base, offset, total }
+
 async function renderListingPage({ category, query } = {}) {
   const grid = document.getElementById("listing-grid");
   const title = document.getElementById("listing-title");
   const countEl = document.getElementById("listing-count");
 
-  let url;
   if (query) {
     title.textContent = `Results for “${query}”`;
-    url = `${API_BASE}/api/search?q=${encodeURIComponent(query)}`;
+    _listing = { base: `${API_BASE}/api/search?q=${encodeURIComponent(query)}`, offset: 0, total: null, query };
   } else {
     title.textContent = category ? category.replace(/_/g, " ") : "All Products";
-    url = category ? `${API_BASE}/api/products?category=${encodeURIComponent(category)}` : `${API_BASE}/api/products`;
+    const b = category ? `${API_BASE}/api/products?category=${encodeURIComponent(category)}` : `${API_BASE}/api/products?`;
+    _listing = { base: b, offset: 0, total: null };
   }
   grid.innerHTML = `<div class="state-msg"><div class="spinner"></div>Loading products…</div>`;
+  _removeLoadMore();
+  await _loadListingPage(true);
 
-  try {
-    const res = await fetch(url);
-    if (!res.ok) throw new Error("Could not load products");
-    const data = await res.json();
-    countEl.textContent = `${data.count} result${data.count === 1 ? "" : "s"}`;
-    if (data.count === 0) {
-      grid.innerHTML = `<div class="state-msg">No products matched${query ? ` “${query}”` : ""}. Try a different search or browse a category.</div>`;
-      return;
+  async function _loadListingPage(reset) {
+    try {
+      const res = await fetch(`${_listing.base}&limit=${LISTING_PAGE_SIZE}&offset=${_listing.offset}`);
+      if (!res.ok) throw new Error("Could not load products");
+      const data = await res.json();
+      _listing.total = data.count;
+      countEl.textContent = `${data.count} result${data.count === 1 ? "" : "s"}`;
+      if (reset && data.count === 0) {
+        grid.innerHTML = `<div class="state-msg">No products matched${_listing.query ? ` “${_listing.query}”` : ""}. Try a different search or browse a category.</div>`;
+        return;
+      }
+      const html = data.items.map(p => productCardHTML(p)).join("");
+      if (reset) grid.innerHTML = html; else grid.insertAdjacentHTML("beforeend", html);
+      wireProductCardInteractions(grid);   // guarded — only wires new cards
+      _listing.offset += data.items.length;
+      _renderLoadMore(_listing.offset < _listing.total, _loadListingPage);
+    } catch (e) {
+      if (reset) { countEl.textContent = ""; grid.innerHTML = `<div class="state-msg">${e.message}. Please try again.</div>`; }
     }
-    grid.innerHTML = data.items.map(p => productCardHTML(p)).join("");
-    wireProductCardInteractions(grid);
-  } catch (e) {
-    countEl.textContent = "";
-    grid.innerHTML = `<div class="state-msg">${e.message}. Please try again.</div>`;
   }
+}
+
+function _removeLoadMore() {
+  document.getElementById("load-more-wrap")?.remove();
+}
+function _renderLoadMore(hasMore, onClick) {
+  _removeLoadMore();
+  if (!hasMore) return;
+  const grid = document.getElementById("listing-grid");
+  const wrap = document.createElement("div");
+  wrap.id = "load-more-wrap";
+  wrap.innerHTML = `<button class="load-more-btn">Load more</button>`;
+  grid.after(wrap);
+  wrap.querySelector(".load-more-btn").addEventListener("click", (e) => {
+    e.target.textContent = "Loading…";
+    onClick(false);
+  });
 }
 
 function wireVisualSearch(buttonId, inputId) {
