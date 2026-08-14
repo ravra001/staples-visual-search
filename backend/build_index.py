@@ -16,6 +16,7 @@ import time
 
 import numpy as np
 
+import config
 from products_data import get_all_products
 from embeddings import BACKEND, embed_image
 
@@ -47,8 +48,9 @@ def main():
 
     os.makedirs(CACHE_DIR, exist_ok=True)
     out = os.path.join(CACHE_DIR, f"index_{BACKEND}.npz")
-    np.savez(out, skus=np.array(skus, dtype=object), vecs=np.array(vecs, dtype=np.float32))
-    print(f"[build_index] wrote {len(skus)} vectors -> {out} in {time.time() - start:.1f}s")
+    np.savez(out, skus=np.array(skus, dtype=object), vecs=np.array(vecs, dtype=np.float32),
+             fingerprint=np.array([config.index_fingerprint()], dtype=object))
+    print(f"[build_index] wrote {len(skus)} vectors ({config.index_fingerprint()}) -> {out} in {time.time() - start:.1f}s")
 
 
 if __name__ == "__main__":

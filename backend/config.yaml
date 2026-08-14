@@ -37,12 +37,23 @@ data:
 
 search:
   top_k: 8
+  page_size: 48          # default page size for /api/products and /api/search
+  max_upload_mb: 10      # reject visual-search uploads larger than this
   category_classifier:
     enabled: true
     confidence_threshold: 45.0   # % — auto-scope search above this confidence
     softmax_temperature: 0.07    # lower = sharper confidence scores
 
+index:
+  # If true, refuse to embed the catalog at startup (fail fast) instead of
+  # re-embedding on a cache miss. Set true in production (Cloud Run) so a
+  # cold-start never fires thousands of embedding calls — ship a prebuilt index.
+  require_prebuilt: false
+
 server:
   host: 127.0.0.1
   port: 8000
   reload: false
+  # Allowed CORS origins. "*" is fine for a local demo; lock to your domain(s)
+  # for a public deployment.
+  cors_origins: ["*"]

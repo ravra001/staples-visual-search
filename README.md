@@ -108,10 +108,16 @@ The two pieces most likely to change as the project matures — the embedding
 model and the catalog store — are each pluggable, and set in **`backend/config.yaml`**.
 The defaults need **no** extra dependencies and run fully offline.
 
-| Setting (config.yaml) | Default | Other options |
+| Setting (config.yaml) | Code fallback | Other options |
 | --- | --- | --- |
 | `embedding.backend` | `heuristic` | `clip` (local OpenCLIP), `vertex` (Vertex AI) |
 | `data.backend` | `memory` | `sql` (Cloud SQL / Postgres or SQLite via `data.database_url`) |
+
+> Note: the **shipped `config.yaml` runs `clip` + the 10k catalog** (the demo you'd
+> show). `heuristic` / `memory` are the zero-config *code* fallbacks used when no
+> config file is present. The embedding index is fingerprinted with the model that
+> built it, so changing `clip.model`/`pretrained` without rebuilding is detected and
+> the stale cache is refused (no silent mis-ranking).
 
 ```yaml
 # Real learned embeddings, still 100% offline (needs the clip extra):

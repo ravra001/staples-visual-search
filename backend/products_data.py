@@ -130,14 +130,18 @@ if _CATALOG_FILE:
 # In-memory backend
 # --------------------------------------------------------------------------
 
+# O(1) sku lookup, built once (the catalog is static in memory mode).
+_BY_SKU = {p["sku"]: p for p in PRODUCTS}
+
 def _mem_all():
     return PRODUCTS
 
 def _mem_by_sku(sku):
-    for p in PRODUCTS:
-        if p["sku"] == sku:
-            return p
-    return None
+    return _BY_SKU.get(sku)
+
+def _mem_by_skus(skus):
+    """Batch lookup — returns {sku: product} for the found skus (single pass)."""
+    return {s: _BY_SKU[s] for s in skus if s in _BY_SKU}
 
 def _mem_by_category(category):
     return [p for p in PRODUCTS if p["category"] == category]
@@ -166,11 +170,13 @@ if DATA_BACKEND == "sql":
     from products_repo_sql import (
         get_all_products,
         get_product_by_sku,
+        get_products_by_skus,
         get_products_by_category,
         search_products,
     )
 else:
     get_all_products = _mem_all
     get_product_by_sku = _mem_by_sku
+    get_products_by_skus = _mem_by_skus
     get_products_by_category = _mem_by_category
     search_products = _mem_search

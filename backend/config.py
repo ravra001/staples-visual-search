@@ -61,11 +61,27 @@ DATABASE_URL = _val("DATABASE_URL", "data.database_url", None)
 
 # ---- search ----
 TOP_K = int(_val("TOP_K", "search.top_k", 8))
+PAGE_SIZE = int(_val("PAGE_SIZE", "search.page_size", 48))
+MAX_UPLOAD_MB = float(_val("MAX_UPLOAD_MB", "search.max_upload_mb", 10))
 CLASSIFIER_ENABLED = bool(_yaml("search.category_classifier.enabled", True))
 CONF_THRESHOLD = float(_val("CONF_THRESHOLD", "search.category_classifier.confidence_threshold", 45.0))
 SOFTMAX_T = float(_val("SOFTMAX_T", "search.category_classifier.softmax_temperature", 0.07))
+
+# ---- index ----
+REQUIRE_PREBUILT_INDEX = str(_val("REQUIRE_PREBUILT_INDEX", "index.require_prebuilt", False)).lower() in ("1", "true", "yes")
 
 # ---- server ----
 SERVER_HOST = _val("HOST", "server.host", "127.0.0.1")
 SERVER_PORT = int(_val("PORT", "server.port", 8000))
 SERVER_RELOAD = bool(_yaml("server.reload", False))
+CORS_ORIGINS = _yaml("server.cors_origins", ["*"]) or ["*"]
+
+
+def index_fingerprint():
+    """Identity of the model an index was built with. A change here means the
+    cached vectors are incompatible and must not be ranked against."""
+    if EMBEDDING_BACKEND == "clip":
+        return f"clip:{CLIP_MODEL}:{CLIP_PRETRAINED}"
+    if EMBEDDING_BACKEND == "vertex":
+        return "vertex:multimodalembedding@001"
+    return "heuristic:v1"

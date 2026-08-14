@@ -158,9 +158,11 @@ get visually similar products ranked by match score.
 
 `index_clip.npz` was built with the model in `config.yaml`
 (`embedding.clip.model: ViT-B-32` / `pretrained: laion2b_s34b_b79k`), so the
-query image and the prebuilt catalog vectors match. **Don't change those two
-values** unless you also rebuild the index (see below), or search quality will be
-wrong.
+query image and the prebuilt catalog vectors match. The index is **fingerprinted**
+with that model — if you change either value without rebuilding, the app detects
+the mismatch on startup and **refuses the stale cache** (it won't silently return
+wrong results). To actually change models, update `config.yaml` and rebuild the
+index (see below).
 
 ---
 
