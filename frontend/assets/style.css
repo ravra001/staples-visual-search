@@ -119,6 +119,7 @@ a { color: inherit; text-decoration: none; }
 .menu-label { font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em; color: var(--gray-text); margin: 6px 8px; font-weight: 700; }
 .menu-item { display: block; padding: 8px 12px; border-radius: 8px; font-size: 13.5px; color: var(--ink); }
 .menu-item:hover { background: #f4f4f4; color: var(--staples-red); }
+.menu-feature + .menu-feature { margin-top: 8px; }
 
 .logo {
   font-size: 28px;
@@ -663,6 +664,34 @@ a { color: inherit; text-decoration: none; }
 .arch-table thead th { background: #fafafa; font-size: 12px; text-transform: uppercase; letter-spacing: 0.03em; color: var(--gray-text); }
 .arch-table td:first-child { font-weight: 700; white-space: nowrap; }
 .arch-table tbody tr:hover { background: #fcf6f6; }
+
+/* ---- How-It-Works doc extras (reuse the arch-* base) ---- */
+.doc-callout {
+  background: linear-gradient(120deg, #fff4f4, #fff);
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--staples-red);
+  border-radius: 12px;
+  padding: 20px 24px;
+  margin: 22px 0;
+  max-width: 820px;
+}
+.doc-callout h3 { margin: 0 0 8px; font-size: 14px; text-transform: uppercase; letter-spacing: 0.04em; color: var(--staples-red); }
+.doc-callout p { margin: 0 0 10px; font-size: 15px; line-height: 1.6; color: #333; }
+.doc-callout p:last-child { margin-bottom: 0; }
+
+.doc-steps { list-style: none; counter-reset: d; padding: 0; margin: 16px 0; max-width: 820px; }
+.doc-steps li { counter-increment: d; position: relative; padding: 3px 0 14px 44px; font-size: 14.5px; line-height: 1.6; color: #333; }
+.doc-steps li::before {
+  content: counter(d); position: absolute; left: 0; top: 1px; width: 28px; height: 28px;
+  background: #fafafa; border: 1px solid var(--border); border-radius: 8px; color: var(--staples-red);
+  font-weight: 700; font-size: 13px; display: flex; align-items: center; justify-content: center;
+}
+.doc-code {
+  background: #fafafa; border: 1px solid var(--border); border-radius: 10px;
+  padding: 14px 16px; overflow-x: auto; margin: 16px 0; max-width: 820px;
+  font-size: 13px; line-height: 1.55;
+}
+.doc-code code { background: none; padding: 0; }
 
 /* scale note cards */
 .note-cards { display: grid; grid-template-columns: repeat(3, 1fr); gap: 18px; }

@@ -1,0 +1,177 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>How Visual Search Works | Staples Visual Search</title>
+<link rel="stylesheet" href="/assets/style.css" />
+</head>
+<body>
+
+<div id="site-header"></div>
+
+<main class="arch-page">
+
+  <header class="arch-hero">
+    <span class="hero-eyebrow">System Explainer</span>
+    <h1>How search-by-photo works</h1>
+    <p>From a user's uploaded photo to eight ranked products — how the catalog is stored, how images
+       become vectors, and how similarity is computed across 10,000 products.</p>
+  </header>
+
+  <!-- ============ CORE IDEA ============ -->
+  <section class="arch-section">
+    <h2>The one idea everything rests on</h2>
+    <div class="doc-callout">
+      <h3>An embedding is a vector</h3>
+      <p>An <strong>embedding</strong> turns an image into a list of numbers — a <strong>vector</strong> —
+         a point in a high-dimensional space. With CLIP (our default model) each image becomes a
+         <strong>512-number vector</strong>, and the model is trained so that visually similar images land
+         <em>close together</em>.</p>
+      <p>So “find similar products” becomes “find the catalog vectors closest to the photo's vector.”
+         Closeness is <strong>cosine similarity</strong> (the cosine of the angle between two vectors:
+         <code>1.0</code> = identical, <code>0</code> = unrelated). Every vector is <strong>L2-normalized</strong>
+         to length 1, so a plain dot product <em>equals</em> cosine similarity — one multiply-add per comparison.</p>
+    </div>
+  </section>
+
+  <!-- ============ PIPELINE DIAGRAM ============ -->
+  <section class="arch-section">
+    <h2>The pipeline at a glance</h2>
+    <p class="arch-lead">Three phases. The expensive part — embedding 10k images — happens once, offline.
+       Every search is one query embedding plus one matrix multiply.</p>
+    <div class="arch-diagram">
+      <div class="tier three">
+        <div class="node data"><b>Catalog</b><small>catalog_abo.json<br/>10k product rows</small></div>
+        <div class="node ml"><b>embed_image()</b><small>CLIP ViT-B-32 → 512-dim<br/>L2-normalized</small></div>
+        <div class="node infra"><b>index_clip.npz</b><small>skus + 10000×512 matrix<br/>+ model fingerprint</small></div>
+      </div>
+      <div class="flow-arrow">Phase 1 · build once (offline)</div>
+      <div class="tier three">
+        <div class="node app"><b>PRODUCTS</b><small>catalog rows in RAM</small></div>
+        <div class="node infra"><b>_index_matrix</b><small>10000×512 normalized</small></div>
+        <div class="node ml"><b>_centroid_matrix</b><small>13×512 category centroids</small></div>
+      </div>
+      <div class="flow-arrow">Phase 2 · loaded at server startup</div>
+      <div class="tier">
+        <div class="node client wide"><b>Phase 3 · a live search</b><small>user photo → embed → classify category → rank (M · q) → top-8 → hydrate → results</small></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ PHASE 1 ============ -->
+  <section class="arch-section">
+    <h2>Phase 1 — Offline prep (run once)</h2>
+
+    <p class="arch-lead"><b>How the catalog is stored.</b> The 10,000 products live in a plain JSON file,
+       <code>backend/data/catalog_abo.json</code> — each entry is just metadata plus a pointer to an image
+       file (no vectors here):</p>
+    <pre class="doc-code"><code>{ "sku": "ABO-B08FHH4RY4",
+  "name": "Rivet Alfred Mid-Century Modern Chair",
+  "brand": "Rivet", "category": "chairs",
+  "price": 129.99, "list_price": 179.99,
+  "rating": 4.4, "reviews": 456,
+  "image_url": "/images/products/ABO-B08FHH4RY4.jpg" }</code></pre>
+    <p class="arch-lead"><b>The images</b> are files on disk at
+       <code>backend/static/images/products/&lt;SKU&gt;.jpg</code>. Each product has one JSON row and one
+       image file named by its SKU.</p>
+
+    <p class="arch-lead"><b>Embedding the catalog</b> is a one-time batch job, <code>build_index.py</code>:</p>
+    <ol class="doc-steps">
+      <li>Loop every product that has an image file.</li>
+      <li>Call <code>embed_image(bytes)</code> — open the image, run CLIP's <code>preprocess</code>
+          (resize 224×224, color-normalize), then <code>model.encode_image()</code> → a raw
+          <strong>512-dim vector</strong>, then <strong>L2-normalize</strong> it to length 1.0.</li>
+      <li>Stack all 10,000 vectors and save <code>index_clip.npz</code>: the SKUs, the
+          <code>(10000, 512)</code> matrix, and a <code>fingerprint</code>
+          (<code>clip:ViT-B-32:laion2b_s34b_b79k</code> — the model identity).</li>
+    </ol>
+    <p class="arch-lead">That <code>.npz</code> <strong>is the precomputed search index</strong>. Embedding
+       10k images on CPU takes ~12 minutes — which is exactly why it's done once and cached.
+       <strong>At runtime we never re-embed the catalog.</strong></p>
+  </section>
+
+  <!-- ============ PHASE 2 ============ -->
+  <section class="arch-section">
+    <h2>Phase 2 — Server startup</h2>
+    <p class="arch-lead"><code>_build_catalog_index()</code> runs on boot and puts everything in memory:</p>
+    <ol class="doc-steps">
+      <li><strong>Read config</strong> (<code>config.yaml</code>) → backend is <code>clip</code>, catalog is <code>catalog_abo.json</code>.</li>
+      <li><strong>Load the catalog</strong> → the <code>PRODUCTS</code> list (10k rows) in RAM.</li>
+      <li><strong>Load the index</strong> from <code>index_clip.npz</code>: verify the <code>fingerprint</code>
+          matches the current model (refuse a stale cache), then hold the <code>(10000, 512)</code> matrix as
+          <code>_index_matrix</code> with parallel SKU and category arrays.</li>
+      <li><strong>Build category centroids</strong>: average each category's vectors into one normalized
+          centroid (its “average look”), stacked into <code>_centroid_matrix</code> <code>(13, 512)</code>.</li>
+      <li><strong>CLIP loads lazily</strong> — the ~577 MB model comes into RAM on the first search (why the
+          first is ~6 s and every one after is fast).</li>
+    </ol>
+  </section>
+
+  <!-- ============ PHASE 3 ============ -->
+  <section class="arch-section">
+    <h2>Phase 3 — A live photo search</h2>
+    <p class="arch-lead">The pipeline for one uploaded photo, end to end.</p>
+    <ol class="flow-strip">
+      <li><span class="flow-num">1</span><b>Upload</b><span>User picks a photo; the browser POSTs it to <code>/api/visual-search</code>.</span></li>
+      <li><span class="flow-num">2</span><b>Validate</b><span>Must be an image; oversized uploads get a clean 413.</span></li>
+      <li><span class="flow-num">3</span><b>Offload</b><span>CPU work runs in a threadpool so the server stays responsive.</span></li>
+      <li><span class="flow-num">4</span><b>Embed</b><span>Same <code>embed_image()</code> as the catalog → a normalized 512-vector <code>q</code>.</span></li>
+      <li><span class="flow-num">5</span><b>Classify</b><span>Centroids · q → predicted category + confidence (the “Detected:” chip).</span></li>
+      <li><span class="flow-num">6</span><b>Rank</b><span><code>scores = M · q</code> — one matmul = a cosine per product; take the top 8.</span></li>
+      <li><span class="flow-num">7</span><b>Hydrate</b><span>Batch-fetch those 8 product rows; attach the % match.</span></li>
+      <li><span class="flow-num">8</span><b>Render</b><span>Draw the chip + 8 cards; weak matches collapse behind an expander.</span></li>
+    </ol>
+    <p class="arch-lead"><b>Why the query and catalog must share the model:</b> vectors are only comparable if they
+       come from the <em>same</em> embedding — that's why the fingerprint pin (Phase 2) matters. <b>Match %</b> on
+       each card is just <code>cosine × 100</code>. In-catalog items score 85–100%; out-of-catalog photos score
+       35–45%, which the threshold turns into a “no strong matches” state.</p>
+  </section>
+
+  <!-- ============ RECAP ============ -->
+  <section class="arch-section">
+    <h2>One line per stage</h2>
+    <div class="table-scroll">
+      <table class="arch-table">
+        <thead><tr><th>Stage</th><th>What happens</th></tr></thead>
+        <tbody>
+          <tr><td>Catalog</td><td>A JSON list of product rows + image files on disk.</td></tr>
+          <tr><td>Offline</td><td>Embed every catalog image once (CLIP → normalized 512-vectors) → <code>index_clip.npz</code>.</td></tr>
+          <tr><td>Startup</td><td>Load catalog + index matrix + category centroids into RAM; CLIP model lazy.</td></tr>
+          <tr><td>Query</td><td>Embed the photo with the same model → classify → matmul against the index → top-8 → look up products → return.</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <!-- ============ GCP MAP ============ -->
+  <section class="arch-section">
+    <h2>Where this maps to GCP</h2>
+    <p class="arch-lead">The shape is identical; only the providers change. See the
+       <a href="/architecture.html">Architecture</a> page for the full on-prem vs GCP diagram.</p>
+    <div class="table-scroll">
+      <table class="arch-table">
+        <thead><tr><th>Local (this repo)</th><th>GCP production</th></tr></thead>
+        <tbody>
+          <tr><td><code>embed_image()</code> — local CLIP</td><td>Vertex AI Multimodal Embeddings (or CLIP on Cloud Run)</td></tr>
+          <tr><td>brute-force <code>M · q</code></td><td>same at 10k–50k; pgvector / Vertex Vector Search only at ≫100k</td></tr>
+          <tr><td><code>catalog_abo.json</code> in RAM</td><td>Cloud SQL (Postgres)</td></tr>
+          <tr><td><code>static/images/</code> on disk</td><td>Cloud Storage + Cloud CDN</td></tr>
+          <tr><td><code>build_index.py</code> offline</td><td>a Cloud Run Job writing the index artifact to GCS</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+</main>
+
+<div id="site-footer"></div>
+
+<script src="/assets/app.js"></script>
+<script>
+  renderSiteChrome();
+  wireVisualSearch('camera-btn', 'visual-search-input');
+  wireTextSearch();
+</script>
+</body>
+</html>
