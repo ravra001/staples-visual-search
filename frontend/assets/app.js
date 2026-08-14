@@ -94,7 +94,11 @@ function renderSiteHeader() {
           <div class="menu-dropdown" id="menu-dropdown" hidden>
             <a class="menu-feature" href="/architecture.html">
               <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M3 21h18"/><path d="M5 21V9l7-5 7 5v12"/><path d="M9 21v-6h6v6"/></svg>
-              <span><strong>Architecture Overview</strong><small>How it works — local &amp; GCP, explained visually</small></span>
+              <span><strong>Architecture Overview</strong><small>On-prem &amp; GCP architecture, explained visually</small></span>
+            </a>
+            <a class="menu-feature" href="/how-it-works.html">
+              <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M4 5.5A1.5 1.5 0 0 1 5.5 4H11v16H5.5A1.5 1.5 0 0 1 4 18.5z"/><path d="M20 5.5A1.5 1.5 0 0 0 18.5 4H13v16h5.5a1.5 1.5 0 0 0 1.5-1.5z"/></svg>
+              <span><strong>How It Works</strong><small>The search pipeline, step by step</small></span>
             </a>
             <div class="menu-divider"></div>
             <p class="menu-label">Shop by category</p>
