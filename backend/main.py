@@ -13,6 +13,7 @@ import time
 from contextlib import asynccontextmanager
 
 import numpy as np
+import config
 from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
@@ -80,9 +81,60 @@ def _build_catalog_index():
           f"embedded {len(_catalog_vectors)} catalog images in {time.time() - start:.2f}s (cached)")
 
 
+# ---- soft category classifier (nearest-centroid over the catalog vectors) ----
+# Reuses the embeddings we already cache: each category's centroid is the mean of
+# its product vectors. A query is classified by its closest centroid. Used to
+# *softly* scope visual search to a category when we're confident — never a hard
+# gate (see visual_search: low confidence falls back to searching everything).
+_sku_category = {}          # sku -> category
+_category_centroids = {}    # category -> unit-norm mean vector
+CONF_THRESHOLD = config.CONF_THRESHOLD   # % — only auto-scope above this confidence
+_SOFTMAX_T = config.SOFTMAX_T            # temperature: sharpens cosine sims into probabilities
+
+
+def _build_category_centroids():
+    from collections import defaultdict
+    cat_of = {p["sku"]: p["category"] for p in get_all_products()}
+    groups = defaultdict(list)
+    for sku, vec in _catalog_vectors.items():
+        c = cat_of.get(sku)
+        if not c:
+            continue
+        _sku_category[sku] = c
+        groups[c].append(vec)
+    for c, vecs in groups.items():
+        m = np.mean(np.stack(vecs), axis=0)
+        n = np.linalg.norm(m)
+        _category_centroids[c] = (m / n) if n > 0 else m
+    print(f"[startup] built {len(_category_centroids)} category centroids for the soft classifier")
+
+
+def _classify(query_vec):
+    """Return {category, confidence(%), ranking:[(cat,%)]} or None if no centroids."""
+    if not _category_centroids:
+        return None
+    cats = list(_category_centroids)
+    qn = np.linalg.norm(query_vec) + 1e-8
+    sims = np.array([
+        float(np.dot(query_vec, _category_centroids[c]) / (qn * (np.linalg.norm(_category_centroids[c]) + 1e-8)))
+        for c in cats
+    ])
+    z = sims / _SOFTMAX_T
+    z -= z.max()
+    e = np.exp(z)
+    probs = e / e.sum()
+    order = np.argsort(probs)[::-1]
+    return {
+        "category": cats[order[0]],
+        "confidence": round(float(probs[order[0]]) * 100, 1),
+        "ranking": [(cats[i], round(float(probs[i]) * 100, 1)) for i in order[:3]],
+    }
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     _build_catalog_index()
+    _build_category_centroids()
     yield
 
 
@@ -94,6 +146,17 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.middleware("http")
+async def no_cache_app_code(request, call_next):
+    """Keep the app's HTML/CSS/JS always fresh (no stale UI after an edit).
+    Product images under /images keep normal caching."""
+    response = await call_next(request)
+    path = request.url.path
+    if path.startswith("/assets/") or path.endswith(".html") or path == "/":
+        response.headers["Cache-Control"] = "no-cache, must-revalidate"
+    return response
 
 
 def _serialize(p):
@@ -135,13 +198,19 @@ def text_search(q: str = ""):
 
 
 @app.get("/api/config")
-def config():
+def app_config():
     """Lets the frontend show which backends are live (demo transparency)."""
     return {"embedding_backend": EMBEDDING_BACKEND, "data_backend": DATA_BACKEND}
 
 
 @app.post("/api/visual-search")
-async def visual_search(file: UploadFile = File(...), top_k: int = 8):
+async def visual_search(file: UploadFile = File(...), top_k: int = config.TOP_K, scope: str = "auto"):
+    """Visual search with soft category scoping.
+
+    scope: "auto"  (default) — scope to the predicted category only when confident
+           "all"   — never scope (search the whole catalog)
+           "force" — always scope to the predicted category
+    """
     if not file.content_type or not file.content_type.startswith("image/"):
         raise HTTPException(400, "Please upload an image file")
 
@@ -154,7 +223,18 @@ async def visual_search(file: UploadFile = File(...), top_k: int = 8):
     except Exception as e:
         raise HTTPException(400, f"Could not process image: {e}")
 
+    # classify the uploaded photo, then decide whether to scope the search
+    cls = _classify(query_vec) if config.CLASSIFIER_ENABLED else None
     catalog = list(_catalog_vectors.items())
+    scoped = False
+    if cls:
+        confident = cls["confidence"] >= CONF_THRESHOLD
+        if scope == "force" or (scope == "auto" and confident):
+            subset = [(s, v) for s, v in catalog if _sku_category.get(s) == cls["category"]]
+            if subset:
+                catalog = subset
+                scoped = True
+
     matches = top_k_matches(query_vec, catalog, k=top_k)
 
     results = []
@@ -165,7 +245,15 @@ async def visual_search(file: UploadFile = File(...), top_k: int = 8):
             item["match_score"] = round(score * 100, 1)
             results.append(item)
 
-    return {"count": len(results), "items": results}
+    return {
+        "count": len(results),
+        "items": results,
+        "predicted_category": cls["category"] if cls else None,
+        "confidence": cls["confidence"] if cls else None,
+        "category_ranking": cls["ranking"] if cls else None,
+        "scoped": scoped,
+        "searched": len(catalog),  # how many vectors were actually ranked
+    }
 
 
 # ---------- static assets ----------

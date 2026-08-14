@@ -16,6 +16,8 @@ these four functions.
 import json
 import os
 
+import config
+
 # category -> (base_color RGB, accent_color RGB, shape) used by the image generator
 CATEGORY_STYLE = {
     "ink_toner": {"color": (30, 30, 30), "accent": (0, 122, 194), "shape": "cartridge"},
@@ -114,7 +116,7 @@ PRODUCTS = [
 # Set CATALOG_FILE=data/catalog_abo.json to replace the built-in demo catalog.
 # --------------------------------------------------------------------------
 
-_CATALOG_FILE = os.environ.get("CATALOG_FILE")
+_CATALOG_FILE = config.CATALOG_FILE
 if _CATALOG_FILE:
     _path = _CATALOG_FILE if os.path.isabs(_CATALOG_FILE) else os.path.join(os.path.dirname(__file__), _CATALOG_FILE)
     with open(_path, encoding="utf-8") as _f:
@@ -157,7 +159,7 @@ def _mem_search(query):
 # Backend dispatch
 # --------------------------------------------------------------------------
 
-DATA_BACKEND = os.environ.get("DATA_BACKEND", "memory").lower()
+DATA_BACKEND = config.DATA_BACKEND
 
 if DATA_BACKEND == "sql":
     # Lazy import so the default path never needs SQLAlchemy installed.

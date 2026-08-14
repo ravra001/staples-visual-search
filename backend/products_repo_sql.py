@@ -22,9 +22,11 @@ from sqlalchemy import (
 )
 from sqlalchemy.orm import declarative_base, sessionmaker
 
-DATABASE_URL = os.environ.get("DATABASE_URL")
+import config
+
+DATABASE_URL = config.DATABASE_URL
 if not DATABASE_URL:
-    raise RuntimeError("DATA_BACKEND=sql requires DATABASE_URL to be set.")
+    raise RuntimeError("data.backend=sql requires data.database_url in config.yaml (or DATABASE_URL).")
 
 engine = create_engine(DATABASE_URL, pool_pre_ping=True, future=True)
 SessionLocal = sessionmaker(bind=engine, future=True)

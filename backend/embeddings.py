@@ -34,6 +34,23 @@ from typing import List, Tuple
 import numpy as np
 from PIL import Image, ImageFilter
 
+import config
+
+# --- Keep the CLIP model bundled WITH the app and run it fully offline ---
+# Point HuggingFace's cache at the project-local folder from config
+# (embedding.clip.cache_dir) so the model travels inside the app package rather
+# than the user's home dir. offline mode (embedding.clip.offline):
+#   auto  -> offline when the model is present in the cache (recommended)
+#   true  -> always offline;  false -> allow downloads.
+# setdefault is used so real env vars still win.
+_HF_LOCAL = config.CLIP_CACHE_DIR if os.path.isabs(config.CLIP_CACHE_DIR) \
+    else os.path.join(os.path.dirname(__file__), config.CLIP_CACHE_DIR)
+os.environ.setdefault("HF_HOME", _HF_LOCAL)
+_hf_hub = os.path.join(_HF_LOCAL, "hub")
+_model_present = os.path.isdir(_hf_hub) and any(n.startswith("models--") for n in os.listdir(_hf_hub))
+if config.CLIP_OFFLINE == "true" or (config.CLIP_OFFLINE == "auto" and _model_present):
+    os.environ.setdefault("HF_HUB_OFFLINE", "1")
+
 # On networks that intercept TLS (corporate proxies / AV), Python's bundled CA
 # set won't trust the interception cert, so model-weight downloads for the clip
 # and vertex backends fail with CERTIFICATE_VERIFY_FAILED. `truststore` makes
@@ -45,8 +62,8 @@ try:  # pragma: no cover
 except Exception:
     pass
 
-# Which backend is active for this process. Fixed at import time.
-BACKEND = os.environ.get("EMBEDDING_BACKEND", "heuristic").lower()
+# Which backend is active for this process. Fixed at import time (from config).
+BACKEND = config.EMBEDDING_BACKEND
 
 # Heuristic vector layout: 27 color-histogram bins + 16 shape-occupancy bins
 # + 16 edge bins. (Other backends have their own, larger dimensionality.)
@@ -126,8 +143,8 @@ def _get_clip():
             "Install them with: pip install -r requirements-ml.txt"
         ) from e
 
-    model_name = os.environ.get("CLIP_MODEL", "ViT-B-32")
-    pretrained = os.environ.get("CLIP_PRETRAINED", "laion2b_s34b_b79k")
+    model_name = config.CLIP_MODEL
+    pretrained = config.CLIP_PRETRAINED
     device = "cuda" if torch.cuda.is_available() else "cpu"
     model, _, preprocess = open_clip.create_model_and_transforms(
         model_name, pretrained=pretrained, device=device
@@ -167,10 +184,10 @@ def _get_vertex():
             "Install it with: pip install -r requirements-ml.txt"
         ) from e
 
-    project = os.environ.get("GCP_PROJECT")
-    location = os.environ.get("GCP_LOCATION", "us-central1")
+    project = config.GCP_PROJECT
+    location = config.GCP_LOCATION
     if not project:
-        raise RuntimeError("EMBEDDING_BACKEND=vertex requires GCP_PROJECT to be set.")
+        raise RuntimeError("vertex backend requires embedding.vertex.project in config.yaml (or GCP_PROJECT).")
     vertexai.init(project=project, location=location)
     model = MultiModalEmbeddingModel.from_pretrained("multimodalembedding@001")
     _vertex_state.update(model=model, MMImage=_import_vertex_image())

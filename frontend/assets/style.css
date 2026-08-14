@@ -515,6 +515,34 @@ a { color: inherit; text-decoration: none; }
 #vs-status { color: var(--ink); font-size: 15px; font-weight: 600; margin: 0 0 6px; }
 .vs-query-hint { color: var(--gray-text); font-size: 13px; margin: 0; }
 
+.vs-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  background: #fff;
+  border: 1px solid var(--border);
+  border-radius: 20px;
+  padding: 6px 12px 6px 10px;
+  font-size: 13px;
+  color: var(--ink);
+  margin: 2px 0 8px;
+}
+.chip-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--staples-red); flex-shrink: 0; }
+.chip-dot.soft { background: #d0a000; }
+.chip-link {
+  background: none;
+  border: none;
+  padding: 0;
+  margin-left: 4px;
+  color: var(--staples-red);
+  font-weight: 700;
+  font-size: 13px;
+  cursor: pointer;
+  text-decoration: underline;
+}
+.chip-link:hover { color: var(--staples-red-dark); }
+
 @media (max-width: 620px) {
   .visual-search-banner { flex-direction: column; text-align: center; }
   .vs-query-frame { width: 120px; height: 120px; }
