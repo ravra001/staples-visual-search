@@ -1,0 +1,48 @@
+# =====================================================================
+# Staples Visual Search — application configuration
+# =====================================================================
+# Edit this file to configure the app; no environment variables needed.
+# (Env vars, if set, still override these values — handy for CI/ops.)
+# Point at a different file with the APP_CONFIG env var if you like.
+
+embedding:
+  # Which image-embedding backend to use:
+  #   heuristic  — colour/shape/edge math, zero deps, fully offline
+  #   clip       — local OpenCLIP model (real semantic search)
+  #   vertex     — Google Vertex AI Multimodal Embeddings
+  backend: clip
+
+  clip:
+    model: ViT-B-32
+    pretrained: laion2b_s34b_b79k
+    # Where the CLIP model lives (relative to backend/). Bundled here so the
+    # app runs offline. Keep in sync with the prebuilt index_clip.npz.
+    cache_dir: models/hf
+    # offline: auto | true | false
+    #   auto  — run offline when the model is present in cache_dir (recommended)
+    #   true  — always offline (fail rather than download)
+    #   false — allow HuggingFace downloads
+    offline: auto
+
+  vertex:
+    project: null          # your GCP project id (backend: vertex)
+    location: us-central1
+
+data:
+  # memory — in-RAM catalog (default) | sql — Cloud SQL / SQLite via database_url
+  backend: memory
+  # Catalog to load. null = built-in 30-item demo. Use the 10k set:
+  catalog_file: data/catalog_abo.json
+  database_url: null       # e.g. sqlite:///data/catalog.db  (backend: sql)
+
+search:
+  top_k: 8
+  category_classifier:
+    enabled: true
+    confidence_threshold: 45.0   # % — auto-scope search above this confidence
+    softmax_temperature: 0.07    # lower = sharper confidence scores
+
+server:
+  host: 127.0.0.1
+  port: 8000
+  reload: false

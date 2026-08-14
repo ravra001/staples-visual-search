@@ -1,0 +1,16 @@
+# Python
+__pycache__/
+*.pyc
+*.egg-info/
+
+# Virtual environments
+.venv/
+venv/
+
+# Packaged bundles
+*.zip
+
+# Bundled CLIP model weights (~577 MB) — exceeds GitHub's 100 MB file limit.
+# Not stored in git. It auto-downloads on the first CLIP run, or copy the
+# backend/models/ folder in manually for a fully-offline install.
+backend/models/

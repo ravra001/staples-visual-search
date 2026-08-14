@@ -1,0 +1,53 @@
+[project]
+name = "staples-visual-search"
+version = "0.1.0"
+description = "Staples-style visual search demo — 10k catalog, CLIP semantic search, YAML-configured."
+readme = "README.md"
+requires-python = ">=3.10"
+
+# Base dependencies — enough to run the app (heuristic backend, in-memory catalog).
+dependencies = [
+    "fastapi>=0.110",
+    "uvicorn[standard]>=0.29",
+    "pillow>=10.0",
+    "numpy>=1.26",
+    "python-multipart>=0.0.9",
+    "pyyaml>=6.0",
+]
+
+[project.optional-dependencies]
+# Local CLIP semantic search:  uv sync --extra clip
+clip = [
+    "torch>=2.2",
+    "open-clip-torch>=2.24",
+    "truststore>=0.9",
+]
+# Google Vertex AI embeddings:  uv sync --extra gcp
+gcp = [
+    "google-cloud-aiplatform>=1.60",
+    "truststore>=0.9",
+]
+# Cloud SQL / SQLite catalog:   uv sync --extra sql
+sql = [
+    "sqlalchemy>=2.0",
+    "psycopg[binary]>=3.1",
+]
+
+# This is an application, not a library — don't build/install the project itself.
+[tool.uv]
+package = false
+# Use the OS certificate store (needed on networks that inspect TLS — corporate
+# proxy / AV — where uv's bundled roots reject the interception cert).
+system-certs = true
+
+# Pull the CPU build of torch on Windows/Linux (smaller, no CUDA); macOS uses the
+# default PyPI wheel (already CPU).
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
+[tool.uv.sources]
+torch = [
+    { index = "pytorch-cpu", marker = "sys_platform == 'win32' or sys_platform == 'linux'" },
+]

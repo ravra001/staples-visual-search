@@ -22,15 +22,19 @@ it runs, then switch to **Mode B** for the good search.
 ```
 staples-visual-search/
 ├─ backend/
-│  ├─ main.py, embeddings.py, products_data.py, ...
+│  ├─ config.yaml                # ALL configuration lives here (no env vars)
+│  ├─ run.py                     # entry point (reads config.yaml)
+│  ├─ main.py, embeddings.py, products_data.py, config.py, ...
 │  ├─ data/
 │  │  ├─ catalog_abo.json        # the 10,000 products (real names + metadata)
 │  │  ├─ index_heuristic.npz     # prebuilt index for Mode A
 │  │  └─ index_clip.npz          # prebuilt index for Mode B (10k CLIP vectors)
+│  ├─ models/hf/                 # bundled CLIP model (577 MB) → Mode B runs OFFLINE
 │  └─ static/images/products/    # ~10,000 real product images (.jpg) + demo (.png)
 ├─ frontend/                     # the web UI (no build step, no Node)
-├─ requirements.txt              # base packages (Mode A)
-├─ requirements-ml.txt           # extra packages for CLIP / GCP (Mode B)
+├─ pyproject.toml + uv.lock      # uv project + locked dependencies
+├─ requirements.txt              # pip alternative (base packages)
+├─ requirements-ml.txt           # pip alternative (CLIP / GCP / SQL extras)
 ├─ README.md                     # full architecture / design notes
 └─ RUN_10K.md                    # this file
 ```
@@ -42,89 +46,94 @@ staples-visual-search/
 - **Python 3.9 or newer** (tested on 3.13). Check with `python --version`.
 - **~1 GB free disk** for Mode A, **~3 GB** for Mode B (PyTorch + the CLIP model).
 - A web browser.
-- For **Mode B only**: internet access on the first run (to download the CLIP
-  model weights, ~350 MB, cached after that).
+- **No internet needed at runtime.** The CLIP model is bundled in
+  `backend/models/hf/`, so Mode B runs fully offline (see below).
 
 > No Node.js, no database, no cloud account, and no Docker are required.
 
+### Offline CLIP model (no HuggingFace downloads)
+
+The CLIP model weights ship inside the package at `backend/models/hf/`. On
+startup the app points HuggingFace's cache there and sets `HF_HUB_OFFLINE=1`
+automatically **when it sees the model present** — so Mode B makes **zero**
+network calls at runtime (no download, not even a metadata check).
+
+- **Keep the `backend/models/hf/` folder** when you copy/unzip the app — that's
+  what makes it offline. (It's ~577 MB; if it's missing, Mode B will try to
+  download the model once on first use instead, which needs internet.)
+- To force a re-download or update the model, run with `HF_HUB_OFFLINE=0`.
+- Mode A (heuristic) never touches HuggingFace at all.
+
 ---
 
-## Step 1 — Create a virtual environment (recommended)
+## Configuration — one file, no environment variables
 
-**Windows (PowerShell):**
-```powershell
+Everything is configured in **`backend/config.yaml`** — which catalog, which
+embedding backend, the classifier, the server host/port. The package already
+ships set to **Mode B (CLIP) + the 10k catalog**, so you don't need to change
+anything. Key settings:
+
+```yaml
+embedding:
+  backend: clip                     # heuristic | clip | vertex
+data:
+  backend: memory
+  catalog_file: data/catalog_abo.json   # the 10k set (null = 30-item demo)
+server:
+  host: 127.0.0.1
+  port: 8000
+```
+
+To run **Mode A (heuristic, no model needed)** instead, just set
+`embedding.backend: heuristic`. (Env vars of the same name still override the
+file if you ever need them — e.g. `EMBEDDING_BACKEND`, `CATALOG_FILE`, `PORT`.)
+
+---
+
+## Step 1 — Install (choose one)
+
+### Option A — `uv` (recommended)
+[uv](https://docs.astral.sh/uv/) creates the virtualenv and installs locked
+dependencies in one step. Install uv (`pip install uv`, or see their site), then:
+
+```bash
+cd staples-visual-search
+uv sync                 # Mode A (heuristic) — base packages only
+uv sync --extra clip    # Mode B (CLIP)      — also installs PyTorch + OpenCLIP
+```
+
+`uv sync` reads `pyproject.toml` / `uv.lock`, creates `.venv`, and installs the
+exact pinned versions. (It's already configured to pull the CPU build of PyTorch
+and to use your OS certificate store.)
+
+### Option B — `pip` + venv
+```bash
 cd staples-visual-search
 python -m venv .venv
-.\.venv\Scripts\Activate.ps1
-```
-
-**macOS / Linux (bash):**
-```bash
-cd staples-visual-search
-python3 -m venv .venv
-source .venv/bin/activate
+# Windows:  .\.venv\Scripts\Activate.ps1     macOS/Linux:  source .venv/bin/activate
+pip install -r requirements.txt              # Mode A
+pip install torch --index-url https://download.pytorch.org/whl/cpu   # Mode B: CPU torch
+pip install -r requirements-ml.txt           # Mode B: CLIP extras
 ```
 
 ---
 
-## Step 2 — Install packages
+## Step 2 — Run
 
-### Mode A (heuristic) — minimal
+With **uv** (no venv activation needed):
 ```bash
-pip install -r requirements.txt
+uv run python backend/run.py
 ```
 
-### Mode B (CLIP) — adds the real model
-Install the base packages, the CPU build of PyTorch (smaller, no GPU needed),
-and the ML extras:
+With **pip/venv** (activate the venv first, then):
 ```bash
-pip install -r requirements.txt
-pip install torch --index-url https://download.pytorch.org/whl/cpu
-pip install -r requirements-ml.txt
+cd backend && python run.py
 ```
 
----
-
-## Step 3 — Run the server (with the 10k catalog)
-
-The catalog is selected with the `CATALOG_FILE` environment variable, and the
-model with `EMBEDDING_BACKEND`. **Setting environment variables differs by OS** —
-use the block for your system.
-
-### Mode A — Heuristic (fast, no model download)
-
-**Windows (PowerShell):**
-```powershell
-cd backend
-$env:CATALOG_FILE = "data/catalog_abo.json"
-python -m uvicorn main:app --host 127.0.0.1 --port 8000
-```
-
-**macOS / Linux (bash):**
-```bash
-cd backend
-CATALOG_FILE=data/catalog_abo.json python -m uvicorn main:app --host 127.0.0.1 --port 8000
-```
-
-### Mode B — CLIP (real semantic search)
-
-**Windows (PowerShell):**
-```powershell
-cd backend
-$env:CATALOG_FILE = "data/catalog_abo.json"
-$env:EMBEDDING_BACKEND = "clip"
-python -m uvicorn main:app --host 127.0.0.1 --port 8000
-```
-
-**macOS / Linux (bash):**
-```bash
-cd backend
-CATALOG_FILE=data/catalog_abo.json EMBEDDING_BACKEND=clip python -m uvicorn main:app --host 127.0.0.1 --port 8000
-```
-
-On the **first** Mode B run, the CLIP model weights download once (you'll see
-Hugging Face progress). Every run after that is offline and instant, because the
-catalog index is already prebuilt.
+`run.py` reads the host/port (and everything else) from `config.yaml`. That's it —
+no environment variables, no long command line. Mode B loads the **bundled** CLIP
+model from `backend/models/hf/` and runs **fully offline**; the catalog index is
+prebuilt, so startup is instant.
 
 ---
 
@@ -147,11 +156,11 @@ get visually similar products ranked by match score.
 
 ## Important: keep the CLIP model consistent
 
-`index_clip.npz` was built with the **default** OpenCLIP model
-(`ViT-B-32` / `laion2b_s34b_b79k`). The app uses that same default, so the query
-image and the prebuilt catalog vectors match. **Do not set `CLIP_PRETRAINED` to a
-different value** — if you do, rebuild the index (see below), or search quality
-will be wrong.
+`index_clip.npz` was built with the model in `config.yaml`
+(`embedding.clip.model: ViT-B-32` / `pretrained: laion2b_s34b_b79k`), so the
+query image and the prebuilt catalog vectors match. **Don't change those two
+values** unless you also rebuild the index (see below), or search quality will be
+wrong.
 
 ---
 
@@ -162,10 +171,12 @@ will be wrong.
 - **PowerShell "running scripts is disabled"** when activating the venv — run
   `Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass` in that window, then
   activate again. (Or skip the venv and `pip install` globally.)
-- **CLIP model download fails with `CERTIFICATE_VERIFY_FAILED`** (corporate
-  networks that inspect TLS) — this is already handled: `requirements-ml.txt`
-  installs `truststore`, which the app uses to trust your OS certificate store.
-  Make sure `pip install -r requirements-ml.txt` succeeded.
+- **CLIP tries to download / can't reach HuggingFace** — the offline model
+  folder `backend/models/hf/` is probably missing from your copy. Restore it, or
+  run once with `HF_HUB_OFFLINE=0` on a machine with internet to fetch it. (If a
+  download is ever needed on a TLS-inspecting corporate network and fails with
+  `CERTIFICATE_VERIFY_FAILED`, that's handled by `truststore` from
+  `requirements-ml.txt`, which trusts your OS certificate store.)
 - **`torch` won't install** — you're likely on an unsupported Python. Use Python
   3.9–3.13, and the CPU index URL shown in Step 2.
 - **Broken image on a few product cards** — ~33 of the 10k had no source image;

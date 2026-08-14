@@ -444,7 +444,12 @@ function startVisualSearch(file) {
   }
 }
 
-async function runVisualSearch(file) {
+// Remembered so the category chip can re-run the same photo with a different scope.
+let _lastQueryFile = null;
+
+async function runVisualSearch(file, opts = {}) {
+  _lastQueryFile = file;
+  const scope = opts.scope || "auto";
   const statusEl = document.getElementById("vs-status");
   const grid = document.getElementById("listing-grid");
 
@@ -460,19 +465,45 @@ async function runVisualSearch(file) {
   formData.append("file", file);
 
   try {
-    const res = await fetch(`${API_BASE}/api/visual-search`, { method: "POST", body: formData });
+    const res = await fetch(`${API_BASE}/api/visual-search?scope=${scope}`, { method: "POST", body: formData });
     if (!res.ok) {
       const err = await res.json().catch(() => ({}));
       throw new Error(err.detail || "Search failed");
     }
     const data = await res.json();
-    statusEl.textContent = `Found ${data.count} similar product${data.count === 1 ? "" : "s"}`;
+    const scopeNote = data.scoped ? ` in ${prettifyCategory(data.predicted_category)}` : "";
+    statusEl.textContent = `Found ${data.count} similar product${data.count === 1 ? "" : "s"}${scopeNote}`;
+    renderCategoryChip(data);
     grid.innerHTML = data.items.map(p => productCardHTML(p)).join("");
     wireProductCardInteractions(grid);
   } catch (e) {
     statusEl.textContent = "Something went wrong analyzing that photo.";
     grid.innerHTML = `<div class="state-msg">${e.message}. Try a different image.</div>`;
   }
+}
+
+// The "Detected: <category>" chip — a soft, user-overridable category filter.
+function renderCategoryChip(data) {
+  const chip = document.getElementById("vs-category-chip");
+  if (!chip) return;
+  if (!data.predicted_category) { chip.hidden = true; return; }
+
+  const label = prettifyCategory(data.predicted_category);
+  const conf = data.confidence != null ? `${data.confidence}%` : "";
+  if (data.scoped) {
+    chip.innerHTML =
+      `<span class="chip-dot"></span>Detected <strong>${label}</strong> · ${conf} confidence` +
+      ` — showing ${label} only <button class="chip-link" data-scope="all">See all categories</button>`;
+  } else {
+    chip.innerHTML =
+      `<span class="chip-dot soft"></span>Looks like <strong>${label}</strong> · ${conf}` +
+      ` — showing all categories <button class="chip-link" data-scope="force">Show ${label} only</button>`;
+  }
+  chip.hidden = false;
+  const btn = chip.querySelector(".chip-link");
+  if (btn) btn.addEventListener("click", () => {
+    if (_lastQueryFile) runVisualSearch(_lastQueryFile, { scope: btn.dataset.scope });
+  });
 }
 
 function renderVisualSearchResultsPage() {

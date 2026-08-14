@@ -10,13 +10,21 @@ into the real Vertex AI-backed architecture from the project's GCP hackathon pla
 
 ## Run it
 
+With **uv** (recommended):
 ```bash
-pip install -r requirements.txt
-cd backend
-python3 -m uvicorn main:app --reload --port 8000
+uv sync                       # or: uv sync --extra clip   (for CLIP mode)
+uv run python backend/run.py
 ```
 
-Then open http://localhost:8000 in a browser.
+With **pip**:
+```bash
+pip install -r requirements.txt
+cd backend && python run.py
+```
+
+Then open http://localhost:8000 in a browser. All settings live in
+**`backend/config.yaml`** (see below) — no environment variables required.
+For the full 10k-catalog / offline-CLIP walkthrough, see **`RUN_10K.md`**.
 
 (Images are pre-generated and already committed under
 `backend/static/images/products/`. If you ever need to regenerate them —
@@ -94,30 +102,36 @@ GCP_PROJECT=<id> python test_gcp.py                    # Vertex AI embedding che
 GCP_PROJECT=<id> DATABASE_URL=... python test_gcp.py   # + Cloud SQL seed/query check
 ```
 
-## Backends (swap via environment variables)
+## Backends (configured in `config.yaml`)
 
 The two pieces most likely to change as the project matures — the embedding
-model and the catalog store — are each pluggable behind a single env var. The
-defaults need **no** extra dependencies and run fully offline.
+model and the catalog store — are each pluggable, and set in **`backend/config.yaml`**.
+The defaults need **no** extra dependencies and run fully offline.
 
-| Env var | Default | Other options |
+| Setting (config.yaml) | Default | Other options |
 | --- | --- | --- |
-| `EMBEDDING_BACKEND` | `heuristic` | `clip` (local OpenCLIP), `vertex` (Vertex AI) |
-| `DATA_BACKEND` | `memory` | `sql` (Cloud SQL / Postgres via `DATABASE_URL`) |
+| `embedding.backend` | `heuristic` | `clip` (local OpenCLIP), `vertex` (Vertex AI) |
+| `data.backend` | `memory` | `sql` (Cloud SQL / Postgres or SQLite via `data.database_url`) |
 
-```bash
-# Real learned embeddings, still 100% offline (needs requirements-ml.txt):
-pip install -r requirements-ml.txt
-EMBEDDING_BACKEND=clip python -m uvicorn main:app --port 8000
+```yaml
+# Real learned embeddings, still 100% offline (needs the clip extra):
+embedding:
+  backend: clip
 
 # Production target — Vertex AI embeddings + Cloud SQL:
-EMBEDDING_BACKEND=vertex GCP_PROJECT=my-proj \
-DATA_BACKEND=sql DATABASE_URL=postgresql+psycopg://user:pass@host/staples \
-  python -m uvicorn main:app --port 8000
+embedding:
+  backend: vertex
+  vertex: { project: my-proj }
+data:
+  backend: sql
+  database_url: postgresql+psycopg://user:pass@host/staples
 ```
 
-`GET /api/config` reports which backends are live. Switching backends changes
-nothing else — `main.py`, the API surface, and the whole frontend are unchanged.
+Then `uv run python backend/run.py`. Every setting also accepts an environment
+variable of the matching name (`EMBEDDING_BACKEND`, `DATA_BACKEND`,
+`DATABASE_URL`, …) which overrides the file — handy for CI/ops. `GET /api/config`
+reports which backends are live. Switching backends changes nothing else —
+`main.py`, the API surface, and the whole frontend are unchanged.
 
 ## How visual search works right now
 
@@ -131,6 +145,19 @@ nothing else — `main.py`, the API surface, and the whole frontend are unchange
    matches are returned with a `match_score`.
 5. Results render on `visual-search.html` using the same product tile component as
    the rest of the site.
+
+### Soft category classifier (coarse-to-fine)
+
+`/api/visual-search` also classifies the uploaded photo into a catalog category
+using a **nearest-centroid classifier** — each category's centroid is the mean of
+its cached product vectors, so it needs no training and reuses the embeddings we
+already have. When the top category is **confident** (≥ `CONF_THRESHOLD`), the
+search is *scoped* to that category (fewer vectors, no cross-category noise);
+when it's unsure, it falls back to searching the whole catalog. It's a **soft**
+filter, never a hard gate — the results page shows a chip ("Detected: Chairs · 61%
+— See all categories" / "Looks like Tables — Show Tables only") so a wrong guess
+is always one click to override. Response fields: `predicted_category`,
+`confidence`, `category_ranking`, `scoped`, `searched`.
 
 **On the default (`heuristic`) backend:** the embedding is a color + shape + edge
 histogram — no ML model, runs anywhere. It reliably finds near-duplicates and
