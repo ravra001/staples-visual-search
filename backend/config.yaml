@@ -39,6 +39,10 @@ search:
   top_k: 8
   page_size: 48          # default page size for /api/products and /api/search
   max_upload_mb: 10      # reject visual-search uploads larger than this
+  # Visual-search results below this % match are treated as "weak" (the query
+  # item probably isn't in the catalog) — the UI hides them behind an expander
+  # and shows a "no strong matches" state. Tune per model/catalog.
+  match_threshold: 55
   category_classifier:
     enabled: true
     confidence_threshold: 45.0   # % — auto-scope search above this confidence

@@ -490,6 +490,7 @@ async function runVisualSearch(file, opts = {}) {
   if (thumb && file) thumb.src = URL.createObjectURL(file);
 
   statusEl.textContent = "Analyzing your photo…";
+  _clearVsExtra();
   grid.innerHTML = `<div class="state-msg"><div class="spinner"></div>Finding similar products…</div>`;
 
   const formData = new FormData();
@@ -502,15 +503,72 @@ async function runVisualSearch(file, opts = {}) {
       throw new Error(err.detail || "Search failed");
     }
     const data = await res.json();
-    const scopeNote = data.scoped ? ` in ${prettifyCategory(data.predicted_category)}` : "";
-    statusEl.textContent = `Found ${data.count} similar product${data.count === 1 ? "" : "s"}${scopeNote}`;
     renderCategoryChip(data);
-    grid.innerHTML = data.items.map(p => productCardHTML(p)).join("");
-    wireProductCardInteractions(grid);
+    renderVisualResults(grid, statusEl, data);
   } catch (e) {
+    _clearVsExtra();
     statusEl.textContent = "Something went wrong analyzing that photo.";
     grid.innerHTML = `<div class="state-msg">${e.message}. Try a different image.</div>`;
   }
+}
+
+// Split results by the server's match_threshold: strong matches shown, weak ones
+// tucked behind an expander. If nothing clears the bar, show an honest empty state
+// (the uploaded item probably isn't in the catalog).
+function renderVisualResults(grid, statusEl, data) {
+  _clearVsExtra();
+  const th = data.match_threshold ?? 0;
+  const items = data.items || [];
+  const strong = items.filter(p => (p.match_score ?? 0) >= th);
+  const weak = items.filter(p => (p.match_score ?? 0) < th);
+  const scopeNote = data.scoped ? ` in ${prettifyCategory(data.predicted_category)}` : "";
+  const lowConf = data.confidence != null && data.confidence < 30;
+
+  if (strong.length) {
+    statusEl.textContent = `Found ${strong.length} strong match${strong.length === 1 ? "" : "es"}${scopeNote}`;
+    grid.innerHTML = strong.map(p => productCardHTML(p)).join("");
+    wireProductCardInteractions(grid);
+    if (weak.length) _appendWeakSection(weak, `Show ${weak.length} lower-confidence match${weak.length === 1 ? "" : "es"}`);
+  } else {
+    statusEl.textContent = "No strong visual matches";
+    grid.innerHTML = `
+      <div class="vs-empty">
+        <div class="vs-empty-badge">0 strong matches</div>
+        <h2>No strong visual matches</h2>
+        <p>We couldn't find products that closely match your photo — it may not be in this catalog${lowConf ? ", and we couldn't confidently categorize it" : ""}. Try a clearer photo, or browse a category.</p>
+      </div>`;
+    if (weak.length) _appendWeakSection(weak, `Show closest matches anyway (${weak.length})`);
+  }
+}
+
+function _clearVsExtra() {
+  document.getElementById("vs-extra")?.remove();
+}
+
+// A collapsible section (button + hidden grid) for the below-threshold matches.
+function _appendWeakSection(weak, showLabel) {
+  const grid = document.getElementById("listing-grid");
+  if (!grid) return;
+  const wrap = document.createElement("div");
+  wrap.id = "vs-extra";
+  wrap.innerHTML = `
+    <div class="vs-more-wrap"><button class="vs-expand-btn" aria-expanded="false">${showLabel}</button></div>
+    <div class="product-grid vs-weak-grid" hidden></div>`;
+  grid.after(wrap);
+  const weakGrid = wrap.querySelector(".vs-weak-grid");
+  const btn = wrap.querySelector(".vs-expand-btn");
+  let built = false;
+  btn.addEventListener("click", () => {
+    const opening = weakGrid.hidden;
+    if (opening && !built) {                       // build + wire the weak cards on first open
+      weakGrid.innerHTML = weak.map(p => productCardHTML(p)).join("");
+      wireProductCardInteractions(weakGrid);
+      built = true;
+    }
+    weakGrid.hidden = !opening;
+    btn.setAttribute("aria-expanded", String(opening));
+    btn.textContent = opening ? "Hide lower-confidence matches" : showLabel;
+  });
 }
 
 // The "Detected: <category>" chip — a soft, user-overridable category filter.

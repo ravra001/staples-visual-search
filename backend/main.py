@@ -326,6 +326,7 @@ async def visual_search(request: Request, file: UploadFile = File(...),
         "category_ranking": cls["ranking"] if cls else None,
         "scoped": r["scoped"],
         "searched": r["searched"],   # how many vectors were actually ranked
+        "match_threshold": config.MATCH_THRESHOLD,   # results below this % are "weak"
     }
 
 

@@ -12,6 +12,10 @@
 
 * { box-sizing: border-box; }
 
+/* The `hidden` attribute must always hide, even on elements with an explicit
+   display (e.g. .product-grid { display: grid }, which would otherwise win). */
+[hidden] { display: none !important; }
+
 body {
   margin: 0;
   font-family: "Helvetica Neue", Arial, sans-serif;
@@ -526,6 +530,43 @@ a { color: inherit; text-decoration: none; }
 .vs-query-meta h1 { font-size: 24px; margin: 0 0 6px; }
 #vs-status { color: var(--ink); font-size: 15px; font-weight: 600; margin: 0 0 6px; }
 .vs-query-hint { color: var(--gray-text); font-size: 13px; margin: 0; }
+
+/* no-strong-matches empty state (spans the product grid) */
+.vs-empty {
+  grid-column: 1 / -1;
+  text-align: center;
+  padding: 40px 20px 8px;
+  max-width: 560px;
+  margin: 0 auto;
+}
+.vs-empty-badge {
+  display: inline-block;
+  background: #f3f3f3;
+  color: var(--gray-text);
+  font-size: 12px;
+  font-weight: 700;
+  padding: 4px 12px;
+  border-radius: 20px;
+  margin-bottom: 14px;
+}
+.vs-empty h2 { font-size: 20px; margin: 0 0 8px; }
+.vs-empty p { color: var(--gray-text); font-size: 14px; line-height: 1.6; margin: 0; }
+
+/* weak (below-threshold) matches expander */
+.vs-more-wrap { text-align: center; margin: 26px 0 6px; }
+.vs-expand-btn {
+  background: #fff;
+  border: 1px solid var(--border);
+  color: var(--gray-text);
+  font-weight: 700;
+  font-size: 13px;
+  padding: 9px 20px;
+  border-radius: 22px;
+  cursor: pointer;
+}
+.vs-expand-btn:hover { border-color: var(--staples-red); color: var(--staples-red); }
+.vs-weak-grid { margin-top: 18px; opacity: 0.85; }
+.vs-weak-grid .product-card { border-style: dashed; }
 
 .vs-chip {
   display: inline-flex;
