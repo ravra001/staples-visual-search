@@ -17,6 +17,7 @@
       <div class="vs-query-frame">
         <img id="query-thumb" alt="The photo you uploaded" />
       </div>
+      <button id="vs-crop-toggle" class="vs-crop-toggle" type="button">Crop to search a region</button>
     </figure>
     <div class="vs-query-meta">
       <h1>Visual search results</h1>
@@ -43,6 +44,7 @@
   renderVisualSearchResultsPage();
   wireVisualSearch('camera-btn', 'visual-search-input');
   wireTextSearch();
+  wireCropToggle('vs-crop-toggle');
 </script>
 </body>
 </html>

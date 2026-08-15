@@ -203,6 +203,15 @@ def search_by_vector(query_vec, category=None, k=8):
         return [(r.sku, float(r.rank_score), float(r.display_score)) for r in rows]
 
 
+def get_image_embedding(sku):
+    """Pure-image vector for an existing catalog product — lets "find similar"
+    query FROM a product already in the catalog instead of an uploaded photo,
+    with no re-embedding needed. Returns None if the sku doesn't exist."""
+    with SessionLocal() as s:
+        row = s.query(Product.image_embedding).filter(Product.sku == sku).first()
+        return np.array(row[0], dtype=np.float32) if row else None
+
+
 def get_categories():
     """Distinct categories, computed in SQL — avoids fetching all ~10k rows
     (full description text included) just to extract 13 distinct strings in
