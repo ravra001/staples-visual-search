@@ -368,56 +368,98 @@ def app_config():
 _MAX_UPLOAD_BYTES = int(config.MAX_UPLOAD_MB * 1024 * 1024)
 
 
-REFINE_IMAGE_WEIGHT = 0.7  # query-side image/text blend when refine_text is given
+REFINE_IMAGE_WEIGHT = 0.7   # query-side image/text blend when refine_text is given
+REFINE_POOL_SIZE = 100      # candidate pool (by pure-image similarity) a text refinement re-ranks within
+
+
+def _search_matches(qn_image, qn_blend, category, top_k):
+    """Runs one search and returns [(sku, display_score), ...] desc.
+
+    Without qn_blend: ranks directly by the pure-image vector, as before.
+
+    With qn_blend: a text refinement ("but in black") must never be allowed
+    to search the WHOLE catalog with the blended vector — a bare color word
+    embeds close to generic solid-color/swatch imagery in CLIP's text space,
+    and blending even 30% of that in was enough to jump a real search
+    entirely out of "clock" territory and onto color swatches (found via
+    manual testing: a wall-clock photo with no strong image-only match, then
+    refined with "but in black", returned Moss/Forest/Natural fabric swatches
+    instead of anything clock-shaped). Two-stage fix: first find a pool of
+    items that already resemble the PHOTO (pure-image ranking, generous k),
+    then re-rank ONLY that pool by the blended vector. A refinement can now
+    only reorder items that were already topically relevant — never conjure
+    an unrelated one.
+    """
+    if DATA_BACKEND == "sql":
+        if qn_blend is not None:
+            pool = sql_repo.search_by_vector(qn_image.tolist(), category=category, k=REFINE_POOL_SIZE)
+            pool_skus = [s for s, _rank_score, _disp in pool]
+            if not pool_skus:
+                return []
+            ranked = sql_repo.search_by_vector(qn_blend.tolist(), category=category, k=top_k, restrict_skus=pool_skus)
+        else:
+            ranked = sql_repo.search_by_vector(qn_image.tolist(), category=category, k=top_k)
+        return [(sku, display_score) for sku, _rank_score, display_score in ranked]
+
+    if qn_blend is not None:
+        pool = _rank(qn_image, REFINE_POOL_SIZE, category=category)
+        pool_idx = [_sku_row[s] for s, _ in pool if s in _sku_row]
+        if not pool_idx:
+            return []
+        sub_matrix, sub_skus = _index_matrix[pool_idx], _index_skus[pool_idx]
+        scores = sub_matrix @ qn_blend
+        k2 = min(top_k, scores.shape[0])
+        top = np.argpartition(-scores, k2 - 1)[:k2]
+        top = top[np.argsort(-scores[top])]
+        matches = [(str(sub_skus[i]), float(scores[i])) for i in top]
+    else:
+        matches = _rank(qn_image, top_k, category=category)
+
+    # RANKING (order + which items) always comes from the fused/blended score
+    # above. What's DISPLAYED (and what the match-threshold gate reacts to) is
+    # the pure-image score instead: more interpretable, since a pure-image
+    # query naturally scores lower against a fused catalog vector than a
+    # pure-image one.
+    disp = _display_scores(qn_image, [s for s, _ in matches])
+    return [(s, disp.get(s, sc)) for s, sc in matches]
 
 
 def _do_visual_search(image_bytes, top_k, scope, refine_text=""):
     """CPU-bound work — embed + classify + rank. Runs in a threadpool so it never
     blocks the event loop (see the endpoint)."""
     query_vec = embed_image(image_bytes)
-    qn = query_vec / (np.linalg.norm(query_vec) + 1e-8)   # normalize the query ONCE
+    qn_image = query_vec / (np.linalg.norm(query_vec) + 1e-8)   # normalize the query ONCE
 
-    # Text-refined query ("but in black", "cheaper leather version"): blend the
-    # photo's embedding with a CLIP text embedding of the refinement, in the
-    # SAME joint space embed_catalog_item() already fuses catalog vectors in —
-    # this is that same trick, applied on the query side instead. Everything
-    # downstream (classification, ranking, the SQL backend's single query)
-    # just sees one blended qn and needs no other change.
-    if refine_text and EMBEDDING_BACKEND == "clip":
-        text_vec = embed_text_clip(refine_text[:200])
-        tn = text_vec / (np.linalg.norm(text_vec) + 1e-8)
-        qn = REFINE_IMAGE_WEIGHT * qn + (1 - REFINE_IMAGE_WEIGHT) * tn
-        qn = qn / (np.linalg.norm(qn) + 1e-8)
-
-    cls = _classify(qn) if config.CLASSIFIER_ENABLED else None
+    # Classification always uses the PURE image vector — a text refinement
+    # like "but in black" shouldn't change what category we think the photo
+    # is, only which of that category's items rise to the top. (Previously
+    # this classified on the blended vector, which made confidence drift on
+    # every refinement for no real reason.)
+    cls = _classify(qn_image) if config.CLASSIFIER_ENABLED else None
     category, scoped = None, False
     if cls and (scope == "force" or (scope == "auto" and cls["confidence"] >= CONF_THRESHOLD)):
         category, scoped = cls["category"], True
 
+    # Text-refined query ("but in black"): blend the photo's embedding with a
+    # CLIP text embedding of the refinement, in the SAME joint space
+    # embed_catalog_item() already fuses catalog vectors in. See
+    # _search_matches for why this blend is constrained to a photo-similar
+    # pool rather than searching the whole catalog with it directly.
+    qn_blend = None
+    if refine_text and EMBEDDING_BACKEND == "clip":
+        text_vec = embed_text_clip(refine_text[:200])
+        tn = text_vec / (np.linalg.norm(text_vec) + 1e-8)
+        qn_blend = REFINE_IMAGE_WEIGHT * qn_image + (1 - REFINE_IMAGE_WEIGHT) * tn
+        qn_blend = qn_blend / (np.linalg.norm(qn_blend) + 1e-8)
+
+    matches = _search_matches(qn_image, qn_blend, category, top_k)
+    if scoped and not matches:              # empty scoped result → fall back to full search
+        category, scoped = None, False
+        matches = _search_matches(qn_image, qn_blend, None, top_k)
+
     if DATA_BACKEND == "sql":
-        # Vector search happens IN POSTGRES: one pgvector query ranks by the
-        # fused `embedding` column (HNSW-indexed) AND returns the pure-image
-        # `image_embedding` cosine for those SAME rows in one round trip — no
-        # separate rank/display pass needed (see sql_repo.search_by_vector).
-        ranked = sql_repo.search_by_vector(qn.tolist(), category=category, k=top_k)
-        if scoped and not ranked:              # empty scoped result → fall back to full search
-            category, scoped = None, False
-            ranked = sql_repo.search_by_vector(qn.tolist(), category=None, k=top_k)
-        matches = [(sku, display_score) for sku, _rank_score, display_score in ranked]
         searched = sql_repo.count_by_category(category)
     else:
-        matches = _rank(qn, top_k, category=category)
-        if scoped and not matches:             # empty scoped result → fall back to full search
-            category, scoped = None, False
-            matches = _rank(qn, top_k)
-
-        # RANKING (order + which items) always comes from the fused score above —
-        # that's what the recall eval validated. What's DISPLAYED (and what the
-        # match-threshold gate below reacts to) is the pure-image score instead:
-        # more interpretable, since a pure-image query naturally scores lower
-        # against a fused catalog vector than against a pure-image one.
-        disp = _display_scores(qn, [s for s, _ in matches])
-        matches = [(s, disp.get(s, fused_score)) for s, fused_score in matches]
         searched = int((_index_cats == category).sum()) if category is not None else int(_index_skus.shape[0])
 
     return {"cls": cls, "scoped": scoped, "matches": matches, "searched": searched}
