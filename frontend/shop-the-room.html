@@ -1,0 +1,46 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Shop the Room | Staples</title>
+<link rel="stylesheet" href="/assets/style.css" />
+</head>
+<body>
+
+<div id="site-header"></div>
+
+<main class="listing-page">
+  <div class="visual-search-banner">
+    <figure class="vs-query-card">
+      <span class="vs-query-label">Your room</span>
+      <div class="vs-query-frame">
+        <img id="room-thumb" alt="The room photo you uploaded" />
+      </div>
+    </figure>
+    <div class="vs-query-meta">
+      <h1>Shop the room</h1>
+      <p id="room-status">Scanning your room…</p>
+      <p class="vs-query-hint">We scan the photo for distinct furnishings and match the single best product for each one — not a pile of near-duplicates of whatever's most prominent.</p>
+      <div id="room-summary"></div>
+    </div>
+  </div>
+
+  <div class="listing-shell">
+    <div class="listing-main" style="width:100%;">
+      <div id="room-grid" class="product-grid room-grid"></div>
+    </div>
+  </div>
+</main>
+
+<div id="site-footer"></div>
+
+<script src="/assets/app.js"></script>
+<script>
+  renderSiteChrome();
+  renderShopTheRoomPage();
+  wireVisualSearch('camera-btn', 'visual-search-input');
+  wireTextSearch();
+</script>
+</body>
+</html>

@@ -535,6 +535,105 @@ function wireVisualSearch(buttonId, inputId) {
   });
 }
 
+// "Shop the Room" — same upload-and-navigate pattern as regular visual
+// search, wired separately since it posts to a different endpoint and lands
+// on its own results page.
+function wireRoomSearch(buttonId, inputId) {
+  const btn = document.getElementById(buttonId);
+  const input = document.getElementById(inputId);
+  if (!btn || !input) return;
+
+  btn.addEventListener("click", () => input.click());
+
+  input.addEventListener("change", () => {
+    const file = input.files[0];
+    input.value = "";
+    if (!file) return;
+    startShopTheRoom(file);
+  });
+}
+
+window.__pendingRoomFile = null;
+
+function startShopTheRoom(file) {
+  window.__pendingRoomFile = file;
+  if (location.pathname.endsWith("shop-the-room.html")) {
+    runShopTheRoom(file);
+  } else {
+    const reader = new FileReader();
+    reader.onload = () => {
+      try { sessionStorage.setItem("roomQueryImage", reader.result); } catch (e) {}
+      location.href = "/shop-the-room.html";
+    };
+    reader.readAsDataURL(file);
+  }
+}
+
+async function runShopTheRoom(file) {
+  const statusEl = document.getElementById("room-status");
+  const grid = document.getElementById("room-grid");
+  const summaryEl = document.getElementById("room-summary");
+  const thumb = document.getElementById("room-thumb");
+  if (thumb && file) thumb.src = URL.createObjectURL(file);
+
+  statusEl.textContent = "Scanning your room…";
+  summaryEl.innerHTML = "";
+  grid.innerHTML = `<div class="state-msg"><div class="spinner"></div>Finding one match per item…</div>`;
+
+  const formData = new FormData();
+  formData.append("file", file);
+
+  try {
+    const res = await fetch(`${API_BASE}/api/shop-the-room`, { method: "POST", body: formData });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.detail || "Search failed");
+    }
+    const data = await res.json();
+    if (!data.count) {
+      statusEl.textContent = "No furnishings recognized";
+      grid.innerHTML = `<div class="state-msg">We couldn't confidently match anything in this photo to the catalog. Try a photo with clearer, more separated items.</div>`;
+      return;
+    }
+    statusEl.textContent = `Found ${data.count} item${data.count === 1 ? "" : "s"} for this room`;
+    grid.innerHTML = data.items.map(p => `
+      <div class="room-item-card">
+        <span class="room-item-cat">${esc(prettifyCategory(p.category))}</span>
+        ${productCardHTML(p)}
+      </div>`).join("");
+    wireProductCardInteractions(grid);
+    summaryEl.innerHTML = `
+      <div class="room-total-row">
+        <div><strong>Room total:</strong> $${data.total_price.toFixed(2)} for ${data.count} item${data.count === 1 ? "" : "s"}</div>
+        <button id="room-add-all" class="hero-cta room-add-all">Add all to cart</button>
+      </div>`;
+    document.getElementById("room-add-all")?.addEventListener("click", (e) => {
+      addToCart(data.count);
+      e.target.textContent = "Added ✓";
+      setTimeout(() => { e.target.textContent = "Add all to cart"; }, 1500);
+    });
+  } catch (e) {
+    statusEl.textContent = "Something went wrong.";
+    grid.innerHTML = `<div class="state-msg">${e.message}.</div>`;
+  }
+}
+
+function renderShopTheRoomPage() {
+  const thumb = document.getElementById("room-thumb");
+  const dataUrl = sessionStorage.getItem("roomQueryImage");
+  if (dataUrl) {
+    thumb.src = dataUrl;
+    fetch(dataUrl).then(r => r.blob()).then(blob => {
+      runShopTheRoom(new File([blob], "room.jpg", { type: blob.type || "image/jpeg" }));
+    });
+  } else if (window.__pendingRoomFile) {
+    thumb.src = URL.createObjectURL(window.__pendingRoomFile);
+    runShopTheRoom(window.__pendingRoomFile);
+  } else {
+    document.getElementById("room-status").textContent = "No photo received — go back and try Shop the Room again.";
+  }
+}
+
 // Holds the in-flight query so the destination page can pick it up.
 window.__pendingVisualSearchFile = null;
 

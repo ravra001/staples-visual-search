@@ -526,6 +526,127 @@ def similar_products(sku: str, top_k: int = 12):
     return {"count": len(results), "items": results}
 
 
+SHOP_ROOM_GRID = 2          # NxN tile sweep of the uploaded photo — kept small
+                            # (5 embed+search calls total: whole image + 4
+                            # tiles) since DATA_BACKEND=sql pays one network
+                            # round trip per tile; measured 3x3 (10 calls) at
+                            # ~30s cross-region in testing, vs. same-region
+                            # Cloud Run->Cloud SQL being far faster per earlier
+                            # single-search timing (~0.4-1.2s) -- 2x2 keeps
+                            # worst-case latency bounded without a redesign.
+SHOP_ROOM_MAX_ITEMS = 6     # cap on distinct categories returned
+
+
+def _tile_crops(image_bytes, grid=SHOP_ROOM_GRID):
+    """Splits a photo into an NxN grid of square-ish crops, plus the whole
+    image (index 0) for context. Each crop is re-encoded as JPEG bytes so it
+    can go through the exact same embed_image() call as a normal upload —
+    no new model, no new preprocessing path."""
+    from PIL import Image
+    import io
+    im = Image.open(io.BytesIO(image_bytes)).convert("RGB")
+    w, h = im.size
+    tiles = [image_bytes]
+    tw, th = w / grid, h / grid
+    for r in range(grid):
+        for c in range(grid):
+            box = (c * tw, r * th, (c + 1) * tw, (r + 1) * th)
+            buf = io.BytesIO()
+            im.crop(box).save(buf, format="JPEG", quality=90)
+            tiles.append(buf.getvalue())
+    return tiles
+
+
+def _do_shop_the_room(image_bytes):
+    """"Shop the room": one photo of a room -> one best-matching product PER
+    DISTINCT category detected in it (the sofa, the rug, the lamp, the wall
+    art), instead of a pile of near-duplicates of whatever's most prominent.
+
+    No new model or endpoint dependency: sweeps the photo into a grid of
+    tiles (_tile_crops), and for each tile reuses exactly the same pipeline
+    a normal search already uses — embed_image, _classify, and
+    _search_matches restricted to that tile's predicted category, top_k=1.
+
+    Unlike a normal search, a tile's classification does NOT need to clear
+    CONF_THRESHOLD — that threshold is calibrated for a different decision
+    ("should we auto-scope a WHOLE photo's search to one category"), and a
+    smaller, partially-cropped tile is inherently less certain even when its
+    top-1 category guess is correct (verified: a lamp tile classified at only
+    36% confidence, well under the 45% auto-scope gate, but its top-1
+    category guess was still right and the resulting product match scored
+    77%). What actually matters here is whether the tile's TOP PRODUCT MATCH
+    clears MATCH_THRESHOLD — the same "is this actually a good match" gate
+    every other search in this app already uses, and a much more direct
+    signal than classifier confidence for "is this tile a real product."
+    Tiles whose top match doesn't clear it (a blank wall, empty floor,
+    nothing catalog-like) are simply skipped. Multiple tiles landing on the
+    same category (e.g. two tiles both seeing the same sofa) keep only the
+    best-scoring one.
+    """
+    best_by_category = {}   # category -> (score, sku)
+    for tile_bytes in _tile_crops(image_bytes):
+        query_vec = embed_image(tile_bytes)
+        qn = query_vec / (np.linalg.norm(query_vec) + 1e-8)
+        cls = _classify(qn) if config.CLASSIFIER_ENABLED else None
+        if not cls:
+            continue
+        category = cls["category"]
+        matches = _search_matches(qn, None, category, 1)
+        if not matches:
+            continue
+        sku, score = matches[0]
+        if score * 100 < config.MATCH_THRESHOLD:
+            continue
+        prev = best_by_category.get(category)
+        if prev is None or score > prev[0]:
+            best_by_category[category] = (score, sku)
+
+    ranked = sorted(best_by_category.items(), key=lambda kv: -kv[1][0])[:SHOP_ROOM_MAX_ITEMS]
+    return [(sku, score) for _category, (score, sku) in ranked]
+
+
+@app.post("/api/shop-the-room")
+async def shop_the_room(request: Request, file: UploadFile = File(...)):
+    """One room photo in, one best-matching product per detected category
+    out, with a running basket total — see _do_shop_the_room."""
+    if not file.content_type or not file.content_type.startswith("image/"):
+        raise HTTPException(400, "Please upload an image file")
+
+    clen = request.headers.get("content-length")
+    if clen and int(clen) > _MAX_UPLOAD_BYTES:
+        raise HTTPException(413, f"Image too large (limit {config.MAX_UPLOAD_MB:g} MB)")
+
+    image_bytes = await file.read(_MAX_UPLOAD_BYTES + 1)
+    if len(image_bytes) == 0:
+        raise HTTPException(400, "Empty file")
+    if len(image_bytes) > _MAX_UPLOAD_BYTES:
+        raise HTTPException(413, f"Image too large (limit {config.MAX_UPLOAD_MB:g} MB)")
+
+    _t0 = time.time()
+    try:
+        matches = await run_in_threadpool(_do_shop_the_room, image_bytes)
+    except Exception as e:
+        raise HTTPException(400, f"Could not process image: {e}")
+    took_ms = round((time.time() - _t0) * 1000)
+
+    by_sku = get_products_by_skus([sku for sku, _ in matches])
+    results, total = [], 0.0
+    for sku, score in matches:
+        p = by_sku.get(sku)
+        if p:
+            item = _serialize(p)
+            item["match_score"] = round(score * 100, 1)
+            results.append(item)
+            total += p["price"]
+
+    return {
+        "count": len(results),
+        "items": results,
+        "total_price": round(total, 2),
+        "took_ms": took_ms,
+    }
+
+
 @app.post("/api/visual-search")
 async def visual_search(request: Request, file: UploadFile = File(...),
                         top_k: int = config.TOP_K, scope: str = "auto", refine_text: str = ""):
