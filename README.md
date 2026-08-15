@@ -1,12 +1,20 @@
 # Staples Visual Search — Hackathon Prototype
 
-A self-contained demo of a "search by photo" feature bolted onto a Staples.com-style
-storefront. Upload a photo (chair, cable, ink cartridge, monitor, etc.) via the camera
-icon in the search bar, and it returns visually similar products from the catalog.
+A "search by photo" feature bolted onto a Staples.com-style storefront, backed
+by a real ~10,000-product catalog (Amazon Berkeley Objects, restyled) and real
+CLIP embeddings. Upload a photo of a chair, lamp, rug, or other home/office
+item via the camera icon in the search bar, and it ranks the catalog by
+visual similarity — with text-refined queries ("but in black"), crop-to-search,
+"find similar" from any product, and an honest "no strong matches" state when
+the photo genuinely isn't in the catalog.
 
-Everything runs locally with **zero cloud dependencies** for now — this is the
-fast-iteration phase. See "Moving to GCP" below for the swap-in points that turn this
-into the real Vertex AI-backed architecture from the project's GCP hackathon plan.
+This runs two ways: **fully offline** (in-memory catalog, bundled CLIP model,
+zero cloud calls — the fast-iteration/local-dev path), or **deployed on GCP**
+(Cloud Run + Cloud SQL/pgvector, `DATA_BACKEND=sql`) — which is how it's
+actually running in production for this project. See **`GCP_SETUP.md`** for
+the full deployment runbook (project → IAM → Cloud SQL/pgvector → Cloud Run,
+with every real bug hit along the way and how it was fixed), and "Moving to
+GCP" below for the backend swap-in points.
 
 ## Run it
 
@@ -36,8 +44,9 @@ from the `backend/` directory.)
 ```
 backend/
   main.py              FastAPI app: serves the frontend + JSON API
-  products_data.py     Catalog repository (30 products / 9 categories). Pluggable:
-                       in-memory (default) OR Cloud SQL, via DATA_BACKEND.
+  products_data.py     Catalog repository. Pluggable: in-memory (default, loads
+                       the 30-item built-in demo OR the 10k ABO set via
+                       CATALOG_FILE) OR Cloud SQL, via DATA_BACKEND.
   products_repo_sql.py Cloud SQL (Postgres) implementation of the repository.
   embeddings.py        Pluggable image embedding: heuristic (default) / local CLIP /
                        Vertex AI, via EMBEDDING_BACKEND. + cosine similarity.

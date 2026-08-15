@@ -385,10 +385,20 @@ def _search_matches(qn_image, qn_blend, category, top_k):
     manual testing: a wall-clock photo with no strong image-only match, then
     refined with "but in black", returned Moss/Forest/Natural fabric swatches
     instead of anything clock-shaped). Two-stage fix: first find a pool of
-    items that already resemble the PHOTO (pure-image ranking, generous k),
-    then re-rank ONLY that pool by the blended vector. A refinement can now
-    only reorder items that were already topically relevant — never conjure
-    an unrelated one.
+    items the NORMAL (unrefined) search would already return — i.e. ranked by
+    the fused vector, generous k — then re-rank ONLY that pool by the blended
+    vector. A refinement can now only reorder items that were already
+    topically relevant — never conjure an unrelated one.
+
+    The SQL backend's second stage deliberately does NOT run a second
+    pgvector query: `ORDER BY embedding <=> :q LIMIT k WHERE sku IN (...)`
+    would let Postgres's planner choose an HNSW index scan for that query,
+    and HNSW is approximate — it only walks `ef_search` candidates, and if
+    too few of those overlap the pool you can silently get fewer than top_k
+    results (or zero), with no error. Fetching the pool's own vectors once
+    and reranking them in NumPy is exact, small (~100 rows), and identical
+    in behavior to the in-memory backend's path below — no ambiguity about
+    what the query planner decides to do.
     """
     if DATA_BACKEND == "sql":
         if qn_blend is not None:
@@ -396,7 +406,10 @@ def _search_matches(qn_image, qn_blend, category, top_k):
             pool_skus = [s for s, _rank_score, _disp in pool]
             if not pool_skus:
                 return []
-            ranked = sql_repo.search_by_vector(qn_blend.tolist(), category=category, k=top_k, restrict_skus=pool_skus)
+            vecs = sql_repo.get_embeddings_by_skus(pool_skus)
+            fused_scores = {sku: float(fused @ qn_blend) for sku, (fused, _img) in vecs.items()}
+            top_skus = sorted(fused_scores, key=fused_scores.get, reverse=True)[:top_k]
+            return [(sku, float(vecs[sku][1] @ qn_image)) for sku in top_skus]
         else:
             ranked = sql_repo.search_by_vector(qn_image.tolist(), category=category, k=top_k)
         return [(sku, display_score) for sku, _rank_score, display_score in ranked]
@@ -461,6 +474,12 @@ def _do_visual_search(image_bytes, top_k, scope, refine_text=""):
         searched = sql_repo.count_by_category(category)
     else:
         searched = int((_index_cats == category).sum()) if category is not None else int(_index_skus.shape[0])
+    # Under a text refinement, only the REFINE_POOL_SIZE-deep pool actually
+    # gets reranked (see _search_matches) — reporting the full catalog/
+    # category count here would overstate it in an app whose whole pitch is
+    # calibrated honesty about what was actually searched.
+    if qn_blend is not None:
+        searched = min(searched, REFINE_POOL_SIZE)
 
     return {"cls": cls, "scoped": scoped, "matches": matches, "searched": searched}
 
