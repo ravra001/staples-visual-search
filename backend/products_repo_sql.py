@@ -287,42 +287,88 @@ def init_and_seed(reuse_vectors_from=None, embed_missing=False):
     if embed_missing:
         from embeddings import embed_catalog_item
 
-    seeded, skipped = 0, []
-    with SessionLocal() as s:
-        for p in PRODUCTS:
-            sku = p["sku"]
-            vecs = reusable.get(sku)
-            if vecs is None:
-                if not embed_missing:
-                    skipped.append(sku)
-                    continue
-                img_path = _image_path(p)
-                if not os.path.exists(img_path):
-                    skipped.append(sku)
-                    continue
-                with open(img_path, "rb") as f:
-                    fused, image_vec = embed_catalog_item(
-                        f.read(), name=p.get("name", ""), brand=p.get("brand", ""),
-                        description=p.get("description", ""), return_image_vec=True)
-                vecs = (fused, image_vec)
+    # Build every row dict up front (no DB I/O yet) — embedding-lookup and
+    # dict construction are pure Python/local, only the DB calls below cross
+    # the network.
+    rows, skipped = [], []
+    for p in PRODUCTS:
+        sku = p["sku"]
+        vecs = reusable.get(sku)
+        if vecs is None:
+            if not embed_missing:
+                skipped.append(sku)
+                continue
+            img_path = _image_path(p)
+            if not os.path.exists(img_path):
+                skipped.append(sku)
+                continue
+            with open(img_path, "rb") as f:
+                fused, image_vec = embed_catalog_item(
+                    f.read(), name=p.get("name", ""), brand=p.get("brand", ""),
+                    description=p.get("description", ""), return_image_vec=True)
+            vecs = (fused, image_vec)
 
-            fused_vec, image_vec = vecs
-            row = s.get(Product, sku) or Product(sku=sku)
-            row.name = p.get("name", "")
-            row.brand = p.get("brand", "")
-            row.category = p["category"]
-            row.price = p.get("price", 0.0)
-            row.list_price = p.get("list_price", p.get("price", 0.0))
-            row.rating = p.get("rating", 0.0)
-            row.reviews = p.get("reviews", 0)
-            row.description = p.get("description", "")
-            row.image_url = p.get("image_url") or f"/images/products/{sku}.png"
-            row.embedding = np.asarray(fused_vec, dtype=np.float32)
-            row.image_embedding = np.asarray(image_vec, dtype=np.float32)
-            row.model_version = model_version
-            s.add(row)
-            seeded += 1
+        fused_vec, image_vec = vecs
+        rows.append({
+            "sku": sku,
+            "name": p.get("name", ""),
+            "brand": p.get("brand", ""),
+            "category": p["category"],
+            "price": p.get("price", 0.0),
+            "list_price": p.get("list_price", p.get("price", 0.0)),
+            "rating": p.get("rating", 0.0),
+            "reviews": p.get("reviews", 0),
+            "description": p.get("description", ""),
+            "image_url": p.get("image_url") or f"/images/products/{sku}.png",
+            "embedding": np.asarray(fused_vec, dtype=np.float32),
+            "image_embedding": np.asarray(image_vec, dtype=np.float32),
+            "model_version": model_version,
+        })
+
+    # The catalog itself can contain duplicate SKUs (verified: catalog_abo.json
+    # has 33) -- the in-memory backend silently tolerates this (a Python list
+    # has no uniqueness constraint), but `sku` is this table's PRIMARY KEY, so
+    # inserting the same SKU twice in one batch is a real UniqueViolation, not
+    # a bug in this function. Dedupe deterministically (keep the LAST/most-
+    # recent occurrence, matching how a plain dict built from the list would
+    # naturally resolve duplicates) so seeding a duplicate-bearing catalog
+    # still succeeds, and surface the count so it's visible, not silent.
+    before = len(rows)
+    rows = list({r["sku"]: r for r in rows}.values())
+    if before != len(rows):
+        print(f"[sql] NOTE: catalog had {before - len(rows)} duplicate SKU(s) — "
+              f"deduped (kept last occurrence). Consider fixing the source catalog.")
+
+    # Bulk insert/update instead of one SELECT-then-write per row — the naive
+    # per-row `session.get(Product, sku)` pattern is fine on localhost but is
+    # a SEPARATE network round trip per row against a remote DB (e.g. Cloud
+    # SQL): 10k rows at even 100-200ms RTT is 15-30+ minutes just for the
+    # existence checks, before a single row is written. Fetching the existing
+    # SKU set ONCE, then batching inserts/updates, turns that into a handful
+    # of round trips regardless of catalog size.
+    BATCH = 1000
+    with SessionLocal() as s:
+        existing_skus = {row[0] for row in s.query(Product.sku).all()}
+        to_insert = [r for r in rows if r["sku"] not in existing_skus]
+        to_update = [r for r in rows if r["sku"] in existing_skus]
+
+        for i in range(0, len(to_insert), BATCH):
+            s.execute(Product.__table__.insert(), to_insert[i:i + BATCH])
+        if to_update:
+            # bindparam-based bulk UPDATE (each dict's "sku" key doubles as the WHERE match)
+            from sqlalchemy import bindparam
+            stmt = (
+                Product.__table__.update()
+                .where(Product.sku == bindparam("b_sku"))
+                .values({k: bindparam(k) for k in to_update[0] if k != "sku"})
+            )
+            for i in range(0, len(to_update), BATCH):
+                batch = [{**r, "b_sku": r["sku"]} for r in to_update[i:i + BATCH]]
+                for d in batch:
+                    del d["sku"]
+                s.execute(stmt, batch)
         s.commit()
+    seeded = len(rows)
 
     if skipped:
         print(f"[sql] WARNING: {len(skipped)} product(s) had no vector available and were skipped "
