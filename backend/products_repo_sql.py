@@ -203,6 +203,29 @@ def search_by_vector(query_vec, category=None, k=8):
         return [(r.sku, float(r.rank_score), float(r.display_score)) for r in rows]
 
 
+def get_categories():
+    """Distinct categories, computed in SQL — avoids fetching all ~10k rows
+    (full description text included) just to extract 13 distinct strings in
+    Python. Used by /api/categories."""
+    with SessionLocal() as s:
+        rows = s.execute(select(Product.category).distinct().order_by(Product.category)).all()
+        return [r[0] for r in rows]
+
+
+def get_products_page(category=None, limit=24, offset=0):
+    """Paginated product listing — LIMIT/OFFSET pushed down to Postgres, so
+    listing a page of the catalog doesn't require fetching every row (with
+    full description text) just to slice it in Python. Used by /api/products.
+    Returns (total_count, [product dict, ...])."""
+    with SessionLocal() as s:
+        base = select(Product)
+        if category is not None:
+            base = base.where(Product.category == category)
+        total = s.execute(select(func.count()).select_from(base.subquery())).scalar_one()
+        rows = s.execute(base.order_by(Product.sku).limit(limit).offset(offset)).scalars().all()
+        return total, [p.as_dict() for p in rows]
+
+
 def count_by_category(category=None):
     """Used for the "searched" field (how many rows were actually eligible) —
     the SQL analogue of counting a category mask over the in-memory matrix."""
