@@ -66,10 +66,17 @@ def main():
         if i % 100 == 0:
             print(f"[build_compare_index] {i}/{len(products)}")
 
+    # Stamp the model identity (not config.index_fingerprint(), which includes
+    # the fusion suffix — single_vecs here is deliberately pure-image and
+    # fused_vecs is fused, both in the SAME file, so one fingerprint can't
+    # describe both columns; compare_search.py checks this against the live
+    # model instead of a single fusion-state string).
+    fp = f"clip:{config.CLIP_MODEL}:{config.CLIP_PRETRAINED}"
     np.savez(OUT, skus=np.array(skus, dtype=object),
               single_vecs=np.array(single_vecs, dtype=np.float32),
-              fused_vecs=np.array(fused_vecs, dtype=np.float32))
-    print(f"[build_compare_index] wrote {len(skus)} products -> {OUT}")
+              fused_vecs=np.array(fused_vecs, dtype=np.float32),
+              fingerprint=np.array([fp], dtype=object))
+    print(f"[build_compare_index] wrote {len(skus)} products ({fp}) -> {OUT}")
 
 
 if __name__ == "__main__":

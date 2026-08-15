@@ -80,14 +80,20 @@ SERVER_RELOAD = bool(_yaml("server.reload", False))
 CORS_ORIGINS = _yaml("server.cors_origins", ["*"]) or ["*"]
 
 
-def index_fingerprint():
-    """Identity of the model (+ fusion config) an index was built with. A change
-    here means the cached vectors are incompatible and must not be ranked
-    against — this covers the model itself AND catalog-side text fusion, since
-    a fused index is not comparable to an image-only one."""
+def index_fingerprint(catalog_hash=None):
+    """Identity of the model (+ fusion config, + optionally the catalog content)
+    an index was built with. A change here means the cached vectors are
+    incompatible and must not be ranked against — covers the model itself,
+    catalog-side text fusion (a fused vector is 70% a function of the product's
+    name/brand/description, so editing that text invalidates the vector even
+    though the model didn't change), and optionally the catalog content itself
+    via catalog_hash (pass a hash of the loaded products' sku+name+brand+
+    description so a text edit or catalog swap is detected, not silently
+    ranked against stale text)."""
     fusion = f":fusion={TEXT_FUSION_IMAGE_WEIGHT:g}" if TEXT_FUSION_ENABLED else ""
+    cat = f":cat={catalog_hash}" if catalog_hash else ""
     if EMBEDDING_BACKEND == "clip":
-        return f"clip:{CLIP_MODEL}:{CLIP_PRETRAINED}{fusion}"
+        return f"clip:{CLIP_MODEL}:{CLIP_PRETRAINED}{fusion}{cat}"
     if EMBEDDING_BACKEND == "vertex":
-        return f"vertex:multimodalembedding@001{fusion}"
-    return "heuristic:v1"
+        return f"vertex:multimodalembedding@001{fusion}{cat}"
+    return f"heuristic:v1{cat}"

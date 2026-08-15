@@ -2,6 +2,17 @@
 
 const API_BASE = ""; // same-origin, FastAPI serves both API and frontend
 
+// Escape catalog text before interpolating into innerHTML. Product names/
+// descriptions come from the ABO dataset (third-party scraped text) — safe
+// today since it's static/trusted at build time, but this is the seam where
+// that assumption would break (e.g. once product data comes from a live DB
+// via the sql backend), so escape defensively rather than trust the source.
+function esc(s) {
+  return String(s ?? "").replace(/[&<>"']/g, c => ({
+    "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
+  }[c]));
+}
+
 // ---------- Persistent cart (localStorage) ----------
 const CART_KEY = "vsCartCount";
 
@@ -250,7 +261,7 @@ function renderSiteFooter() {
       </div>
     </div>
     <div class="footer-bar">
-      <p>© 1998–${year} Staples, Inc. — <strong>Demo prototype, not affiliated with Staples, Inc.</strong> All product names &amp; images are fictional placeholders.</p>
+      <p>© 1998–${year} Staples, Inc. — <strong>Demo prototype, not affiliated with Staples, Inc.</strong> Product photography from the open Amazon Berkeley Objects dataset (CC BY-NC 4.0) — demo use only.</p>
       <p class="footer-legal"><a href="#">Site Map</a> · <a href="#">Privacy Notice</a> · <a href="#">Terms &amp; Conditions</a> · <a href="#">California Notice</a></p>
     </div>
   </footer>`;
@@ -321,8 +332,8 @@ function productCardHTML(p, opts = {}) {
   return `
     <div class="product-card" data-sku="${p.sku}">
       ${matchBadge}
-      <a class="product-media" href="${href}"><img src="${p.image_url}" alt="${p.name}" loading="lazy" /></a>
-      <a class="product-name" href="${href}">${p.name}</a>
+      <a class="product-media" href="${href}"><img src="${esc(p.image_url)}" alt="${esc(p.name)}" loading="lazy" /></a>
+      <a class="product-name" href="${href}">${esc(p.name)}</a>
       <div class="stars">${starString(p.rating)} <span class="count">(${p.reviews})</span></div>
       <div class="price-row">
         <span class="price">$${p.price.toFixed(2)}</span>
@@ -525,12 +536,19 @@ async function runVisualSearch(file, opts = {}) {
 // (the uploaded item probably isn't in the catalog).
 function renderVisualResults(grid, statusEl, data) {
   _clearVsExtra();
-  const th = data.match_threshold ?? 0;
   const items = data.items || [];
-  const strong = items.filter(p => (p.match_score ?? 0) >= th);
-  const weak = items.filter(p => (p.match_score ?? 0) < th);
   const scopeNote = data.scoped ? ` in ${prettifyCategory(data.predicted_category)}` : "";
   const lowConf = data.confidence != null && data.confidence < 30;
+
+  // match_threshold is only calibrated for the "image" score scale. If the
+  // server ever falls back to displaying the raw fused score (score_basis ===
+  // "fused" — a rare fallback, e.g. an older index cache without image_vecs),
+  // that threshold would misfire (a genuine match reads far lower on the fused
+  // scale), so don't filter at all in that case — show everything as-is.
+  const thresholdApplies = data.score_basis !== "fused";
+  const th = thresholdApplies ? (data.match_threshold ?? 0) : -Infinity;
+  const strong = items.filter(p => (p.match_score ?? 0) >= th);
+  const weak = items.filter(p => (p.match_score ?? 0) < th);
 
   if (strong.length) {
     statusEl.textContent = `Found ${strong.length} strong match${strong.length === 1 ? "" : "es"}${scopeNote}`;
@@ -653,21 +671,21 @@ async function renderProductDetail(elId) {
     el.innerHTML = `
       <nav class="breadcrumb">
         <a href="/">Home</a> ›
-        <a href="/category.html?category=${encodeURIComponent(p.category)}">${catLabel}</a> ›
-        <span>${p.name}</span>
+        <a href="/category.html?category=${encodeURIComponent(p.category)}">${esc(catLabel)}</a> ›
+        <span>${esc(p.name)}</span>
       </nav>
       <div class="pdp">
-        <div class="pdp-media"><img src="${p.image_url}" alt="${p.name}" /></div>
+        <div class="pdp-media"><img src="${esc(p.image_url)}" alt="${esc(p.name)}" /></div>
         <div class="pdp-info">
-          <p class="pdp-brand">${p.brand || "Staples"}</p>
-          <h1 class="pdp-name">${p.name}</h1>
+          <p class="pdp-brand">${esc(p.brand || "Staples")}</p>
+          <h1 class="pdp-name">${esc(p.name)}</h1>
           <div class="stars">${starString(p.rating)} <span class="count">${p.rating} · ${p.reviews} reviews</span></div>
           <div class="pdp-price-row">
             <span class="price">$${p.price.toFixed(2)}</span>
             <span class="list-price">$${p.list_price.toFixed(2)}</span>
             <span class="pdp-savings">Save ${p.savings_pct}%</span>
           </div>
-          <p class="pdp-desc">${p.description || ""}</p>
+          <p class="pdp-desc">${esc(p.description || "")}</p>
           <div class="pdp-actions">
             <div class="qty-stepper">
               <button class="qty-dec" aria-label="Decrease">−</button>

@@ -180,3 +180,15 @@ else:
     get_products_by_skus = _mem_by_skus
     get_products_by_category = _mem_by_category
     search_products = _mem_search
+
+
+def catalog_content_hash():
+    """Short hash of every product's sku+name+brand+description, so an index
+    cache can detect when catalog TEXT changed (not just the model) — a fused
+    vector is 70% a function of this text, so an edit here silently invalidates
+    the cached vector even though embedding.backend/model didn't change."""
+    import hashlib
+    h = hashlib.sha1()
+    for p in sorted(get_all_products(), key=lambda p: p["sku"]):
+        h.update(f"{p['sku']}|{p.get('name', '')}|{p.get('brand', '')}|{p.get('description', '')[:300]}".encode("utf-8"))
+    return h.hexdigest()[:12]
