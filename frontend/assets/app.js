@@ -453,6 +453,37 @@ function _renderLoadMore(hasMore, onClick) {
   });
 }
 
+// Clickable "try one of these" thumbnails — real catalog photos known to
+// return strong matches, so a judge/visitor with no photo on hand can still
+// see the full search flow in one click. Reuses the same startVisualSearch
+// pipeline as a real upload (fetch the image, wrap it as a File, go).
+const HERO_SAMPLE_SKUS = [
+  "ABO-B08FHH4RY4", // chair
+  "ABO-B07F2X89KT", // sofa
+  "ABO-B07MBFDQHP", // table lamp
+  "ABO-B07HSN877K", // rug
+  "ABO-B073P19TDR", // wall art
+  "ABO-B07HSKW3D6", // storage
+];
+
+function renderHeroSamples(mountId) {
+  const mount = document.getElementById(mountId);
+  if (!mount) return;
+  mount.innerHTML = HERO_SAMPLE_SKUS.map(sku => `
+    <button class="hero-sample-thumb" data-sku="${sku}" title="Search with this photo">
+      <img src="/images/products/${sku}.jpg" alt="" loading="lazy" />
+    </button>`).join("");
+  mount.querySelectorAll(".hero-sample-thumb").forEach(btn => {
+    btn.addEventListener("click", async () => {
+      const sku = btn.dataset.sku;
+      const res = await fetch(`/images/products/${sku}.jpg`);
+      const blob = await res.blob();
+      const file = new File([blob], `${sku}.jpg`, { type: blob.type || "image/jpeg" });
+      startVisualSearch(file);
+    });
+  });
+}
+
 function wireVisualSearch(buttonId, inputId) {
   const btn = document.getElementById(buttonId);
   const input = document.getElementById(inputId);
@@ -494,12 +525,16 @@ function startVisualSearch(file) {
   }
 }
 
-// Remembered so the category chip can re-run the same photo with a different scope.
+// Remembered so the category chip / refine box can re-run the same photo
+// with a different scope or refinement without asking the user to re-upload.
 let _lastQueryFile = null;
+let _lastRefineText = "";
 
 async function runVisualSearch(file, opts = {}) {
   _lastQueryFile = file;
   const scope = opts.scope || "auto";
+  const refineText = opts.refineText !== undefined ? opts.refineText : _lastRefineText;
+  _lastRefineText = refineText;
   const statusEl = document.getElementById("vs-status");
   const grid = document.getElementById("listing-grid");
 
@@ -516,7 +551,9 @@ async function runVisualSearch(file, opts = {}) {
   formData.append("file", file);
 
   try {
-    const res = await fetch(`${API_BASE}/api/visual-search?scope=${scope}`, { method: "POST", body: formData });
+    const qs = new URLSearchParams({ scope });
+    if (refineText) qs.set("refine_text", refineText);
+    const res = await fetch(`${API_BASE}/api/visual-search?${qs}`, { method: "POST", body: formData });
     if (!res.ok) {
       const err = await res.json().catch(() => ({}));
       throw new Error(err.detail || "Search failed");
@@ -524,11 +561,34 @@ async function runVisualSearch(file, opts = {}) {
     const data = await res.json();
     renderCategoryChip(data);
     renderVisualResults(grid, statusEl, data);
+    renderRefineBox(data);
   } catch (e) {
     _clearVsExtra();
     statusEl.textContent = "Something went wrong analyzing that photo.";
     grid.innerHTML = `<div class="state-msg">${e.message}. Try a different image.</div>`;
   }
+}
+
+// "but in black" / "cheaper" text box — blends a CLIP text embedding into the
+// query on the next search (see backend's refine_text param). Rendered fresh
+// after every search so it reflects the current photo/refinement state.
+function renderRefineBox(data) {
+  const mount = document.getElementById("vs-refine");
+  if (!mount) return;
+  mount.innerHTML = `
+    <form id="vs-refine-form" class="vs-refine-form" autocomplete="off">
+      <input id="vs-refine-input" type="text" placeholder="Refine with text — e.g. &quot;but in black&quot; or &quot;cheaper&quot;" value="${esc(_lastRefineText)}" />
+      <button type="submit">Refine</button>
+      ${_lastRefineText ? `<button type="button" id="vs-refine-clear">Clear</button>` : ""}
+    </form>`;
+  mount.querySelector("#vs-refine-form").addEventListener("submit", (e) => {
+    e.preventDefault();
+    const text = mount.querySelector("#vs-refine-input").value.trim();
+    if (_lastQueryFile) runVisualSearch(_lastQueryFile, { refineText: text });
+  });
+  mount.querySelector("#vs-refine-clear")?.addEventListener("click", () => {
+    if (_lastQueryFile) runVisualSearch(_lastQueryFile, { refineText: "" });
+  });
 }
 
 // Split results by the server's match_threshold: strong matches shown, weak ones
@@ -539,6 +599,13 @@ function renderVisualResults(grid, statusEl, data) {
   const items = data.items || [];
   const scopeNote = data.scoped ? ` in ${prettifyCategory(data.predicted_category)}` : "";
   const lowConf = data.confidence != null && data.confidence < 30;
+
+  const statsEl = document.getElementById("vs-stats");
+  if (statsEl) {
+    statsEl.textContent = (data.searched != null && data.took_ms != null)
+      ? `Ranked ${data.searched.toLocaleString()} products in ${data.took_ms}ms`
+      : "";
+  }
 
   // match_threshold is only calibrated for the "image" score scale. If the
   // server ever falls back to displaying the raw fused score (score_basis ===

@@ -296,6 +296,23 @@ a { color: inherit; text-decoration: none; }
 }
 .hero-cta:hover { background: var(--staples-red-dark); }
 
+.hero-samples { margin-top: 18px; }
+.hero-samples-label { display: block; font-size: 12px; color: var(--gray-text); margin-bottom: 8px; }
+.hero-sample-row { display: flex; gap: 10px; justify-content: center; flex-wrap: wrap; }
+.hero-sample-thumb {
+  width: 56px;
+  height: 56px;
+  padding: 0;
+  border: 2px solid var(--border);
+  border-radius: 10px;
+  overflow: hidden;
+  background: #fff;
+  cursor: pointer;
+  transition: border-color 0.15s;
+}
+.hero-sample-thumb:hover { border-color: var(--staples-red); }
+.hero-sample-thumb img { width: 100%; height: 100%; object-fit: cover; display: block; }
+
 /* ---------- Category grid ---------- */
 
 .category-grid-section { max-width: 1280px; margin: 40px auto; padding: 0 20px; }
@@ -531,6 +548,36 @@ a { color: inherit; text-decoration: none; }
 .vs-query-meta h1 { font-size: 24px; margin: 0 0 6px; }
 #vs-status { color: var(--ink); font-size: 15px; font-weight: 600; margin: 0 0 6px; }
 .vs-query-hint { color: var(--gray-text); font-size: 13px; margin: 0; }
+.vs-stats { color: var(--gray-text); font-size: 12px; margin: 4px 0 0; font-variant-numeric: tabular-nums; }
+
+.vs-refine-form { display: flex; gap: 8px; margin-top: 12px; max-width: 480px; }
+.vs-refine-form input[type="text"] {
+  flex: 1;
+  padding: 9px 12px;
+  border: 1px solid var(--border);
+  border-radius: 20px;
+  font-size: 13px;
+}
+.vs-refine-form button[type="submit"] {
+  background: var(--staples-red);
+  color: #fff;
+  border: none;
+  border-radius: 20px;
+  padding: 9px 18px;
+  font-size: 13px;
+  font-weight: 700;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.vs-refine-form button#vs-refine-clear {
+  background: none;
+  border: 1px solid var(--border);
+  border-radius: 20px;
+  padding: 9px 14px;
+  font-size: 13px;
+  cursor: pointer;
+  color: var(--gray-text);
+}
 
 /* no-strong-matches empty state (spans the product grid) */
 .vs-empty {
