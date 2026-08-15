@@ -104,8 +104,10 @@
       <li><strong>Read config</strong> (<code>config.yaml</code>) → backend is <code>clip</code>, catalog is <code>catalog_abo.json</code>.</li>
       <li><strong>Load the catalog</strong> → the <code>PRODUCTS</code> list (10k rows) in RAM.</li>
       <li><strong>Load the index</strong> from <code>index_clip.npz</code>: verify the <code>fingerprint</code>
-          matches the current model (refuse a stale cache), then hold the <code>(10000, 512)</code> matrix as
-          <code>_index_matrix</code> with parallel SKU and category arrays.</li>
+          matches the current model (refuse a stale cache), then hold <strong>two</strong> aligned
+          <code>(10000, 512)</code> matrices with parallel SKU and category arrays —
+          <code>_index_matrix</code> (fused image+text, for <em>ranking</em>) and
+          <code>_index_image_matrix</code> (pure image, for <em>display</em>; see Phase 3).</li>
       <li><strong>Build category centroids</strong>: average each category's vectors into one normalized
           centroid (its “average look”), stacked into <code>_centroid_matrix</code> <code>(13, 512)</code>.</li>
       <li><strong>CLIP loads lazily</strong> — the ~577 MB model comes into RAM on the first search (why the
@@ -123,15 +125,28 @@
       <li><span class="flow-num">3</span><b>Offload</b><span>CPU work runs in a threadpool so the server stays responsive.</span></li>
       <li><span class="flow-num">4</span><b>Embed</b><span>Same <code>embed_image()</code> as the catalog → a normalized 512-vector <code>q</code>.</span></li>
       <li><span class="flow-num">5</span><b>Classify</b><span>Centroids · q → predicted category + confidence (the “Detected:” chip).</span></li>
-      <li><span class="flow-num">6</span><b>Rank</b><span><code>scores = M · q</code> — one matmul = a cosine per product; take the top 8.</span></li>
-      <li><span class="flow-num">7</span><b>Hydrate</b><span>Batch-fetch those 8 product rows; attach the % match.</span></li>
-      <li><span class="flow-num">8</span><b>Render</b><span>Draw the chip + 8 cards; weak matches collapse behind an expander.</span></li>
+      <li><span class="flow-num">6</span><b>Rank</b><span><code>scores = M_fused · q</code> — one matmul, best recall (validated +8pt over image-only); take the top 8.</span></li>
+      <li><span class="flow-num">7</span><b>Score for display</b><span><code>M_image[top-8] · q</code> — the SAME top-8 items' pure-image cosine, shown as the % badge instead of the fused score.</span></li>
+      <li><span class="flow-num">8</span><b>Hydrate</b><span>Batch-fetch those 8 product rows; attach the display % match.</span></li>
+      <li><span class="flow-num">9</span><b>Render</b><span>Draw the chip + 8 cards; matches below the threshold collapse behind an expander.</span></li>
     </ol>
+    <div class="doc-callout">
+      <h3>Ranking vs. display: two scores, on purpose</h3>
+      <p>A pure-image query naturally scores <em>lower</em> against a fused (image+text) catalog vector than
+         against a pure-image one — CLIP's image and text embeddings don't perfectly overlap (the “modality
+         gap”), and blending in 70% text pulls a catalog vector toward text-space. Showing that fused number
+         directly made a near-perfect match read as a discouraging ~60%.</p>
+      <p>So the two jobs are split: <strong>which</strong> 8 products appear (and their order) always comes from
+         the fused score — that's what the recall eval validated. <strong>What number is shown</strong> — and
+         what the match-threshold gate reacts to — is a separate pure-image cosine, computed only for those 8
+         already-chosen items (cheap: 8 dot products, not a second full ranking pass). A genuine match now
+         reads ~85–100%, same scale as before fusion existed.</p>
+    </div>
     <p class="arch-lead"><b>Why the query and catalog must share the model:</b> vectors are only comparable if they
        come from the <em>same</em> embedding — that's why the fingerprint pin (Phase 2) matters. <b>Match %</b> on
-       each card is just <code>cosine × 100</code>. Catalog vectors fuse each product's image with its
-       name/brand/description text (see below) — genuine matches cluster ~60–65%, out-of-catalog photos
-       ~40–46%, which the configurable threshold turns into a “no strong matches” state.</p>
+       each card is the pure-image <code>cosine × 100</code> for the ranked item (see the callout above) —
+       genuine matches read ~85–100%, real out-of-catalog photos ~30–54%, which the configurable threshold
+       (55%) turns into a “no strong matches” state.</p>
   </section>
 
   <!-- ============ RECAP ============ -->

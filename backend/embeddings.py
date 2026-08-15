@@ -184,7 +184,8 @@ def _l2norm(v: np.ndarray) -> np.ndarray:
     return v / n if n > 0 else v
 
 
-def embed_catalog_item(image_bytes: bytes, name: str = "", brand: str = "", description: str = "") -> np.ndarray:
+def embed_catalog_item(image_bytes: bytes, name: str = "", brand: str = "", description: str = "",
+                        return_image_vec: bool = False):
     """Embed a CATALOG product: image, optionally fused with its text (name/brand/
     description) per config.TEXT_FUSION_*. Validated (recall eval) to beat
     image-only retrieval — see backend/experimental/eval_text_fusion.py.
@@ -194,6 +195,12 @@ def embed_catalog_item(image_bytes: bytes, name: str = "", brand: str = "", desc
     stored for each catalog item, matching Amazon's published approach (fuse on
     the catalog side; compare a pure-image query against it).
 
+    Returns the fused vector (used for RANKING). If return_image_vec=True,
+    returns (fused_vec, image_vec) instead — the raw image vector is kept
+    alongside so callers can show a pure-image similarity score to users
+    (interpretable, same scale as before fusion) while still ranking by the
+    fused vector (better recall). See main.py's dual-score display.
+
     Only supported on the clip backend today; other backends fall back to
     image-only (no error — fusion is an enhancement, not a requirement).
     """
@@ -202,8 +209,10 @@ def embed_catalog_item(image_bytes: bytes, name: str = "", brand: str = "", desc
     if BACKEND == "clip" and config.TEXT_FUSION_ENABLED and text.strip(". "):
         text_vec = embed_text_clip(text[:300])
         w = config.TEXT_FUSION_IMAGE_WEIGHT
-        return _l2norm(w * _l2norm(image_vec) + (1 - w) * _l2norm(text_vec))
-    return image_vec
+        fused = _l2norm(w * _l2norm(image_vec) + (1 - w) * _l2norm(text_vec))
+    else:
+        fused = image_vec
+    return (fused, image_vec) if return_image_vec else fused
 
 
 # --------------------------------------------------------------------------

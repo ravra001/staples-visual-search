@@ -29,6 +29,15 @@ embedding:
   # product's image with its name/brand/description text beat image-only
   # retrieval by +8pts recall@1 at image_weight=0.3 on a 497-product sample.
   # Zero query-time cost — only affects how catalog vectors are built.
+  #
+  # DUAL-SCORE DISPLAY: RANKING always uses the fused vector (this setting).
+  # But a pure-image query naturally scores lower against a fused vector than
+  # against a pure-image one, so the % shown to users (and match_threshold,
+  # below) uses a SEPARATE pure-image score computed only for the items the
+  # fused ranking already chose (see main.py: _index_image_matrix /
+  # _display_scores). Ranking quality and score interpretability are
+  # deliberately decoupled — best of both, at the cost of the rare case where
+  # an item ranks well on text but shows a lower visual-match %.
   text_fusion:
     enabled: true
     image_weight: 0.3   # text weight = 1 - image_weight
@@ -52,15 +61,16 @@ search:
   # item probably isn't in the catalog) — the UI hides them behind an expander
   # and shows a "no strong matches" state. Tune per model/catalog.
   #
-  # NOTE: this value is coupled to embedding.text_fusion. A pure-image query
-  # compared against a FUSED (image+text) catalog vector scores meaningfully
-  # lower than image-vs-image, because averaging in text pulls the vector
-  # direction away from pure image space. Measured on the live 10k index after
-  # enabling fusion (image_weight=0.3): genuine matches ~60-65%, an
-  # out-of-domain probe ~41-46% -- midpoint ~53. (Pre-fusion this was 55, based
-  # on genuine ~87-100% vs out-of-domain ~35-45%.) If you change text_fusion's
-  # enabled flag or image_weight, re-measure and update this value.
-  match_threshold: 53
+  # NOTE: the displayed/gated score is the DUAL-SCORE pure-image cosine (see
+  # embedding.text_fusion above), NOT the fused score used for ranking -- so
+  # this is calibrated the same way as a plain image-only system. Measured on
+  # the live 10k index: self-query (exact catalog photo) ~99-100%, real
+  # out-of-domain product photos (categories absent from the catalog, e.g. a
+  # monitor/printer/ink cartridge against this furniture-and-decor catalog)
+  # ~30-54%, with random noise scoring anomalously HIGH (~57-73%, NOT a
+  # reliable "not in catalog" proxy -- always calibrate against real photos).
+  # 55 sits just above the highest real out-of-domain probe observed (~54%).
+  match_threshold: 55
   category_classifier:
     enabled: true
     confidence_threshold: 45.0   # % — auto-scope search above this confidence
