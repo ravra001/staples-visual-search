@@ -182,6 +182,14 @@ def search_by_vector(query_vec, category=None, k=8):
     a user only supplies a photo, never text).
     """
     with SessionLocal() as s:
+        # HNSW is approximate: pgvector's default hnsw.ef_search=40 explores
+        # too little of the graph for a ~10k-row catalog and can get stuck in
+        # the wrong neighborhood entirely for ambiguous queries (verified:
+        # missed every wall-clock product for a photo whose dominant visual
+        # feature — a ring of colored wedges — sits near the succulent/leaf
+        # wall-art cluster). SET LOCAL scopes this to the current transaction
+        # only, so it doesn't leak into other sessions/queries.
+        s.execute(text("SET LOCAL hnsw.ef_search = 200"))
         rank_dist = Product.embedding.cosine_distance(query_vec)
         disp_dist = Product.image_embedding.cosine_distance(query_vec)
         stmt = (
