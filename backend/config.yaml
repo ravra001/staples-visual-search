@@ -24,6 +24,15 @@ embedding:
     #   false — allow HuggingFace downloads
     offline: auto
 
+  # Catalog-side image+text fusion (clip backend only). Validated by a held-out
+  # recall eval (backend/experimental/eval_text_fusion.py): fusing each
+  # product's image with its name/brand/description text beat image-only
+  # retrieval by +8pts recall@1 at image_weight=0.3 on a 497-product sample.
+  # Zero query-time cost — only affects how catalog vectors are built.
+  text_fusion:
+    enabled: true
+    image_weight: 0.3   # text weight = 1 - image_weight
+
   vertex:
     project: null          # your GCP project id (backend: vertex)
     location: us-central1
@@ -42,7 +51,16 @@ search:
   # Visual-search results below this % match are treated as "weak" (the query
   # item probably isn't in the catalog) — the UI hides them behind an expander
   # and shows a "no strong matches" state. Tune per model/catalog.
-  match_threshold: 55
+  #
+  # NOTE: this value is coupled to embedding.text_fusion. A pure-image query
+  # compared against a FUSED (image+text) catalog vector scores meaningfully
+  # lower than image-vs-image, because averaging in text pulls the vector
+  # direction away from pure image space. Measured on the live 10k index after
+  # enabling fusion (image_weight=0.3): genuine matches ~60-65%, an
+  # out-of-domain probe ~41-46% -- midpoint ~53. (Pre-fusion this was 55, based
+  # on genuine ~87-100% vs out-of-domain ~35-45%.) If you change text_fusion's
+  # enabled flag or image_weight, re-measure and update this value.
+  match_threshold: 53
   category_classifier:
     enabled: true
     confidence_threshold: 45.0   # % — auto-scope search above this confidence
