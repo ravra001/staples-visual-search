@@ -20,3 +20,11 @@ backend/static/images/multiview/
 backend/data/catalog_multiview*.json
 backend/data/index_multiview*.npz
 backend/data/index_compare.npz
+
+# Local secrets — never commit real credentials (e.g. DATABASE_URL for a live
+# Cloud SQL instance). Set these locally; they're read at test/run time only.
+backend/.env.local
+backend/.env.local.txt
+*.env.local
+*.env.local.txt
+.env*
