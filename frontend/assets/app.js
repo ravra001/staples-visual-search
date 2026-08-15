@@ -453,7 +453,7 @@ async function renderListingPage({ category, query } = {}) {
       _listing.total = data.count;
       countEl.textContent = `${data.count} result${data.count === 1 ? "" : "s"}`;
       if (reset && data.count === 0) {
-        grid.innerHTML = `<div class="state-msg">No products matched${_listing.query ? ` “${_listing.query}”` : ""}. Try a different search or browse a category.</div>`;
+        grid.innerHTML = `<div class="state-msg">No products matched${_listing.query ? ` “${esc(_listing.query)}”` : ""}. Try a different search or browse a category.</div>`;
         return;
       }
       const html = data.items.map(p => productCardHTML(p)).join("");
@@ -524,6 +524,7 @@ function wireVisualSearch(buttonId, inputId) {
 
   input.addEventListener("change", () => {
     const file = input.files[0];
+    input.value = "";   // reset so picking the SAME file again still fires "change"
     if (!file) return;
     // stash the file in sessionStorage-free way: use an in-memory transfer via
     // the File object + navigate with a small delay isn't possible across pages,
@@ -716,11 +717,20 @@ function renderVisualResults(grid, statusEl, data) {
   const strong = items.filter(p => (p.match_score ?? 0) >= th);
   const weak = items.filter(p => (p.match_score ?? 0) < th);
 
-  if (strong.length) {
+  // The backend now fetches a wider pool than the grid displays by default
+  // (see config.yaml's search.top_k) so sort/price/text refinements have real
+  // material to reorder instead of just shuffling a handful of tiles. Cap the
+  // main grid to a clean row-and-a-bit and fold any overflow into the same
+  // collapsible section as the below-threshold matches.
+  const DISPLAY_CAP = 12;
+  const shown = strong.slice(0, DISPLAY_CAP);
+  const more = strong.slice(DISPLAY_CAP).concat(weak);
+
+  if (shown.length) {
     statusEl.textContent = `Found ${strong.length} strong match${strong.length === 1 ? "" : "es"}${scopeNote}`;
-    grid.innerHTML = strong.map(p => productCardHTML(p)).join("");
+    grid.innerHTML = shown.map(p => productCardHTML(p)).join("");
     wireProductCardInteractions(grid);
-    if (weak.length) _appendWeakSection(weak, `Show ${weak.length} lower-confidence match${weak.length === 1 ? "" : "es"}`);
+    if (more.length) _appendWeakSection(more, `Show ${more.length} more match${more.length === 1 ? "" : "es"}`);
   } else {
     statusEl.textContent = "No strong visual matches";
     grid.innerHTML = `
@@ -729,7 +739,7 @@ function renderVisualResults(grid, statusEl, data) {
         <h2>No strong visual matches</h2>
         <p>We couldn't find products that closely match your photo — it may not be in this catalog${lowConf ? ", and we couldn't confidently categorize it" : ""}. Try a clearer photo, or browse a category.</p>
       </div>`;
-    if (weak.length) _appendWeakSection(weak, `Show closest matches anyway (${weak.length})`);
+    if (more.length) _appendWeakSection(more, `Show closest matches anyway (${more.length})`);
   }
 }
 

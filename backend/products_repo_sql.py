@@ -220,6 +220,21 @@ def get_image_embedding(sku):
         return np.array(row[0], dtype=np.float32) if row else None
 
 
+def get_embeddings_by_skus(skus):
+    """Fused + pure-image vectors for a specific (small) set of skus, in one
+    query. Used for the second stage of a text-refined search: reranking a
+    ~100-row pool in Python removes any ambiguity about whether Postgres's
+    planner picks the (approximate) HNSW index for a WHERE sku IN (...) +
+    ORDER BY <=> query — see _search_matches in main.py."""
+    if not skus:
+        return {}
+    with SessionLocal() as s:
+        rows = s.query(Product.sku, Product.embedding, Product.image_embedding) \
+            .filter(Product.sku.in_(list(skus))).all()
+        return {sku: (np.array(fused, dtype=np.float32), np.array(image, dtype=np.float32))
+                for sku, fused, image in rows}
+
+
 def get_categories():
     """Distinct categories, computed in SQL — avoids fetching all ~10k rows
     (full description text included) just to extract 13 distinct strings in

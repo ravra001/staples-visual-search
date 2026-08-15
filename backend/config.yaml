@@ -54,7 +54,11 @@ data:
   database_url: null       # e.g. sqlite:///data/catalog.db  (backend: sql)
 
 search:
-  top_k: 8
+  # Fetched from the backend on every search — deliberately wider than what's
+  # shown by default (see the frontend's DISPLAY_CAP in renderVisualResults)
+  # so sort/price-refine/text-refine have real material to work with instead
+  # of just reordering the same handful of tiles.
+  top_k: 48
   page_size: 48          # default page size for /api/products and /api/search
   max_upload_mb: 10      # reject visual-search uploads larger than this
   # Visual-search results below this % match are treated as "weak" (the query
