@@ -203,8 +203,11 @@ backend they can hurt match quality.
 
 ## Notes
 
-- All product names/images are fictional placeholders for demo purposes — not real
-  Staples product data or photography.
+- Not affiliated with Staples, Inc. — this is a demo storefront skin, not real Staples
+  data. The 30-item quick-start catalog is fictional placeholder data. The 10k catalog
+  (`ingest_abo.py`, see above) is **real product names/photography from the open Amazon
+  Berkeley Objects dataset, licensed CC BY-NC 4.0 (non-commercial)** — demo/hackathon use
+  only, not a license to ship in any commercial product.
 - Cart persists client-side in `localStorage` (a counter — no checkout).
 - Text search is wired to `GET /api/search` (name/brand/category/description match).
   Visual search remains the headline feature.

@@ -19,17 +19,26 @@ import os
 
 import numpy as np
 
-from embeddings import embed_image
+import config
+from embeddings import BACKEND as EMBEDDING_BACKEND, embed_image
 
-BACKEND = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-DATA_DIR = os.path.join(BACKEND, "data")
+BACKEND_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+DATA_DIR = os.path.join(BACKEND_DIR, "data")
 COMPARE_NPZ = os.path.join(DATA_DIR, "index_compare.npz")
 MULTIVIEW_NPZ = os.path.join(DATA_DIR, "index_multiview.npz")
 CATALOG_JSON = os.path.join(DATA_DIR, "catalog_multiview_text.json")
 
 READY = all(os.path.exists(p) for p in (COMPARE_NPZ, MULTIVIEW_NPZ, CATALOG_JSON))
 
+# The model these experimental indices were built with — compared against the
+# LIVE embedding model at load time, so a model change (e.g. EMBEDDING_BACKEND
+# flipped, or CLIP_MODEL/CLIP_PRETRAINED changed) is detected instead of
+# silently ranking a new-model query against old-model vectors and presenting
+# it as a fair method comparison.
+_EXPECTED_MODEL = f"clip:{config.CLIP_MODEL}:{config.CLIP_PRETRAINED}"
+
 _state = {}
+_load_error = None
 
 
 def _norm_rows(m):
@@ -39,28 +48,66 @@ def _norm_rows(m):
     return m / n
 
 
+class CompareUnavailable(Exception):
+    """Raised when the experimental data exists but doesn't match the live
+    model, or is otherwise unusable — distinct from READY=False (missing
+    files), so the endpoint can report a clear reason instead of a raw 500."""
+
+
+def _check_fingerprint(npz, path):
+    fp = str(npz["fingerprint"][0]) if "fingerprint" in npz else None
+    if fp != _EXPECTED_MODEL:
+        raise CompareUnavailable(
+            f"{os.path.basename(path)} was built with {fp!r}, but the live model is "
+            f"{_EXPECTED_MODEL!r}. Rebuild it (see backend/experimental/) before comparing."
+        )
+
+
 def _load():
-    if _state:
+    if _state or _load_error:
+        if _load_error:
+            raise _load_error
         return _state
-    with open(CATALOG_JSON, encoding="utf-8") as f:
-        products = {p["sku"]: p for p in json.load(f)}
+    try:
+        if EMBEDDING_BACKEND != "clip":
+            raise CompareUnavailable(
+                f"The compare tool needs EMBEDDING_BACKEND=clip (experimental data is CLIP-only); "
+                f"the live server is running {EMBEDDING_BACKEND!r}.")
 
-    c = np.load(COMPARE_NPZ, allow_pickle=True)
-    baseline_skus = np.array(c["skus"], dtype=object)
-    baseline_matrix = _norm_rows(c["single_vecs"])
-    fusion_matrix = _norm_rows(c["fused_vecs"])
+        with open(CATALOG_JSON, encoding="utf-8") as f:
+            products = {p["sku"]: p for p in json.load(f)}
 
-    mv = np.load(MULTIVIEW_NPZ, allow_pickle=True)
-    mv_skus = np.array(mv["row_skus"], dtype=object)
-    mv_matrix = _norm_rows(mv["vecs"])
+        c = np.load(COMPARE_NPZ, allow_pickle=True)
+        _check_fingerprint(c, COMPARE_NPZ)
+        baseline_skus = np.array(c["skus"], dtype=object)
+        baseline_matrix = _norm_rows(c["single_vecs"])
+        fusion_matrix = _norm_rows(c["fused_vecs"])
 
-    _state.update(
-        products=products,
-        baseline_skus=baseline_skus, baseline_matrix=baseline_matrix,
-        fusion_matrix=fusion_matrix,
-        mv_skus=mv_skus, mv_matrix=mv_matrix,
-    )
-    print(f"[compare_search] loaded {len(products)} products for the 3-way method comparison tool")
+        mv = np.load(MULTIVIEW_NPZ, allow_pickle=True)
+        mv_fp = str(mv["fingerprint"][0]) if "fingerprint" in mv else None
+        if not (mv_fp or "").startswith(f"clip:{config.CLIP_MODEL}:{config.CLIP_PRETRAINED}"):
+            raise CompareUnavailable(
+                f"{os.path.basename(MULTIVIEW_NPZ)} was built with {mv_fp!r}, but the live model "
+                f"needs clip:{config.CLIP_MODEL}:{config.CLIP_PRETRAINED}. Rebuild it.")
+        mv_skus = np.array(mv["row_skus"], dtype=object)
+        mv_matrix = _norm_rows(mv["vecs"])
+
+        dims = {baseline_matrix.shape[1] if baseline_matrix.size else None,
+                fusion_matrix.shape[1] if fusion_matrix.size else None,
+                mv_matrix.shape[1] if mv_matrix.size else None}
+        if len(dims - {None}) > 1:
+            raise CompareUnavailable(f"Dimension mismatch across the compare indices: {dims}. Rebuild them together.")
+
+        _state.update(
+            products=products,
+            baseline_skus=baseline_skus, baseline_matrix=baseline_matrix,
+            fusion_matrix=fusion_matrix,
+            mv_skus=mv_skus, mv_matrix=mv_matrix,
+        )
+        print(f"[compare_search] loaded {len(products)} products for the 3-way method comparison tool")
+    except CompareUnavailable as e:
+        globals()["_load_error"] = e
+        raise
     return _state
 
 

@@ -27,6 +27,7 @@ from products_data import (
     get_products_by_skus,
     get_products_by_category,
     search_products,
+    catalog_content_hash,
 )
 from embeddings import BACKEND as EMBEDDING_BACKEND, embed_image, embed_catalog_item
 
@@ -80,24 +81,42 @@ def _build_catalog_index():
     products = [p for p in get_all_products() if os.path.exists(_image_path(p))]
     want = {p["sku"] for p in products}
     cat_of = {p["sku"]: p["category"] for p in get_all_products()}
-    fp = config.index_fingerprint()
+    fp = config.index_fingerprint(catalog_hash=catalog_content_hash())
 
     skus = vecs = image_vecs = None
     cache = _cache_path()
     if os.path.exists(cache):
         data = np.load(cache, allow_pickle=True)
+        # A missing fingerprint must be treated as a MISMATCH, not accepted —
+        # an older cache with no fingerprint predates a model/fusion/catalog
+        # change just as surely as one with a different fingerprint string.
         cached_fp = str(data["fingerprint"][0]) if "fingerprint" in data else None
         cached_skus = list(data["skus"])
-        if cached_fp is not None and cached_fp != fp:
-            # A model/pretrained change since this cache was built — refuse it
-            # rather than rank against vectors from a different model.
+        if cached_fp != fp:
             print(f"[startup] WARNING: index cache {os.path.basename(cache)} was built by "
-                  f"{cached_fp!r}, but this process is {fp!r}. Ignoring stale cache.")
+                  f"{cached_fp!r}, but this process needs {fp!r}. Ignoring stale/unfingerprinted cache.")
         elif want.issubset(set(cached_skus)):
-            skus, vecs = cached_skus, data["vecs"]
-            # image_vecs is optional (older caches predate dual-vector storage);
-            # display score gracefully falls back to the fused score without it.
-            image_vecs = data["image_vecs"] if "image_vecs" in data else None
+            # Reindex to exactly `want`, in `products` order — cached_skus may be
+            # a SUPERSET (e.g. a smaller catalog loaded against a bigger cache);
+            # do NOT let extra rows leak into the live index (they'd have no
+            # category, be excluded from centroids/scoped search, and be
+            # unreachable via get_products_by_skus — a confusing partial state).
+            row_of = {s: i for i, s in enumerate(cached_skus)}
+            order = [row_of[p["sku"]] for p in products]
+            skus = [p["sku"] for p in products]
+            vecs = data["vecs"][order]
+            # image_vecs is optional (older caches predate dual-vector storage).
+            # Must be FULLY aligned with vecs (same row count + dim) or not used
+            # at all — a partial/misaligned image_vecs would silently attach the
+            # wrong product's display score to a result while ranking still
+            # looks fine, which is worse than no display score.
+            raw_image_vecs = data["image_vecs"] if "image_vecs" in data else None
+            if raw_image_vecs is not None and raw_image_vecs.shape[0] == len(cached_skus) \
+                    and raw_image_vecs.shape[1] == data["vecs"].shape[1]:
+                image_vecs = raw_image_vecs[order]
+            elif raw_image_vecs is not None:
+                print(f"[startup] WARNING: image_vecs shape {raw_image_vecs.shape} doesn't match "
+                      f"vecs/skus — disabling display score for this boot (falls back to fused score).")
             print(f"[startup] loaded {len(skus)} vectors from cache ({fp}) in {time.time() - start:.2f}s"
                   f"{'' if image_vecs is not None else ' (no image_vecs — display score will use fused)'}")
 
@@ -255,11 +274,18 @@ def _serialize(p):
 
 # ---------- API ----------
 
+_MAX_PAGE_SIZE = 200
+
+
 def _page(items, limit, offset):
-    """Slice a result list into a page and report the true total."""
+    """Slice a result list into a page and report the true total. limit/offset
+    are clamped so a request can't force the whole catalog into one response
+    (?limit=-1 previously returned everything but one item; ?limit=999999 was
+    unbounded)."""
     total = len(items)
-    offset = max(offset, 0)
-    window = items[offset: offset + limit] if limit is not None else items[offset:]
+    offset = max(int(offset), 0)
+    limit = max(1, min(int(limit), _MAX_PAGE_SIZE)) if limit is not None else _MAX_PAGE_SIZE
+    window = items[offset: offset + limit]
     return total, window
 
 
@@ -342,6 +368,8 @@ async def visual_search(request: Request, file: UploadFile = File(...),
     if not file.content_type or not file.content_type.startswith("image/"):
         raise HTTPException(400, "Please upload an image file")
 
+    top_k = max(1, min(int(top_k), 100))   # a negative/huge top_k previously returned the whole catalog
+
     # Reject clearly-oversized uploads up front (before reading the body).
     clen = request.headers.get("content-length")
     if clen and int(clen) > _MAX_UPLOAD_BYTES:
@@ -377,6 +405,13 @@ async def visual_search(request: Request, file: UploadFile = File(...),
         "scoped": r["scoped"],
         "searched": r["searched"],   # how many vectors were actually ranked
         "match_threshold": config.MATCH_THRESHOLD,   # results below this % are "weak"
+        # "image" = displayed % is pure-image cosine (match_threshold's calibrated
+        # scale); "fused" = no valid image_vecs this boot, displayed % is the raw
+        # fused score instead (reads much lower for the same true match quality —
+        # match_threshold is NOT calibrated for this scale). Deterministic per
+        # boot, not per-request, since it reflects whether the loaded index has
+        # aligned image_vecs at all.
+        "score_basis": "image" if _index_image_matrix.size else "fused",
     }
 
 
@@ -391,10 +426,14 @@ try:
         async def experimental_compare_search(file: UploadFile = File(...), top_k: int = 8):
             if not file.content_type or not file.content_type.startswith("image/"):
                 raise HTTPException(400, "Please upload an image file")
+            top_k = max(1, min(int(top_k), 50))
             image_bytes = await file.read(_MAX_UPLOAD_BYTES + 1)
             if not image_bytes or len(image_bytes) > _MAX_UPLOAD_BYTES:
                 raise HTTPException(400, "Invalid or oversized image")
-            return await run_in_threadpool(compare_search.compare, image_bytes, top_k)
+            try:
+                return await run_in_threadpool(compare_search.compare, image_bytes, top_k)
+            except compare_search.CompareUnavailable as e:
+                raise HTTPException(409, str(e))   # stale/mismatched experimental data — clear reason, not a 500
         print("[startup] experimental compare-search endpoint registered (/api/experimental/compare-search)")
 except Exception as e:
     print(f"[startup] experimental compare-search not available ({e}) — skipping, production unaffected")

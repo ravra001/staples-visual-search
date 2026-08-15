@@ -68,13 +68,15 @@
   wireTextSearch();
 
   function cmpCardHTML(item) {
+    // esc() is defined in app.js (loaded before this inline script) — catalog
+    // text (product names) is interpolated into innerHTML, so escape it.
     return `
       <div class="cmp-card">
         <div class="cmp-thumb-wrap">
-          ${item.image_url ? `<img src="${item.image_url}" alt="${item.name}" loading="lazy" />` : `<div class="cmp-thumb-missing">No image</div>`}
+          ${item.image_url ? `<img src="${esc(item.image_url)}" alt="${esc(item.name)}" loading="lazy" />` : `<div class="cmp-thumb-missing">No image</div>`}
           <span class="match-badge">${item.match_score}% match</span>
         </div>
-        <p class="cmp-name">${item.name}</p>
+        <p class="cmp-name">${esc(item.name)}</p>
       </div>`;
   }
 
