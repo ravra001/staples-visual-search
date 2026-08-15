@@ -395,7 +395,30 @@ a { color: inherit; text-decoration: none; }
   padding: 3px 8px;
   border-radius: 12px;
 }
-.product-media { display: block; }
+.product-media { position: relative; }
+.product-media > a { display: block; }
+.find-similar-link {
+  position: absolute;
+  right: 8px;
+  bottom: 8px;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  background: rgba(255,255,255,0.95);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  padding: 5px 10px 5px 8px;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--ink);
+  text-decoration: none;
+  opacity: 0;
+  transform: translateY(4px);
+  transition: opacity 0.12s, transform 0.12s;
+}
+.product-card:hover .find-similar-link,
+.find-similar-link:focus-visible { opacity: 1; transform: translateY(0); }
+.find-similar-link:hover { border-color: var(--staples-red); color: var(--staples-red); }
 .product-name {
   display: block;
   font-size: 13px;
@@ -479,6 +502,7 @@ a { color: inherit; text-decoration: none; }
   align-items: start;
 }
 .pdp-media {
+  position: relative;
   border: 1px solid var(--border);
   border-radius: 12px;
   background: #fafafa;
@@ -488,6 +512,24 @@ a { color: inherit; text-decoration: none; }
   justify-content: center;
 }
 .pdp-media img { width: 100%; max-width: 420px; aspect-ratio: 1/1; object-fit: contain; }
+.pdp-find-similar {
+  position: absolute;
+  right: 16px;
+  bottom: 16px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  background: #fff;
+  border: 1px solid var(--border);
+  border-radius: 18px;
+  padding: 8px 14px 8px 12px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--ink);
+  text-decoration: none;
+  box-shadow: 0 2px 6px rgba(0,0,0,0.08);
+}
+.pdp-find-similar:hover { border-color: var(--staples-red); color: var(--staples-red); }
 
 .pdp-brand { font-size: 13px; font-weight: 700; color: var(--staples-red); text-transform: uppercase; letter-spacing: 0.04em; margin: 0 0 8px; }
 .pdp-name { font-size: 26px; line-height: 1.25; margin: 0 0 12px; }
@@ -545,6 +587,62 @@ a { color: inherit; text-decoration: none; }
 }
 /* contain, not cover — show the WHOLE photo the user uploaded */
 .vs-query-frame img { width: 100%; height: 100%; object-fit: contain; }
+.vs-crop-toggle {
+  background: none;
+  border: none;
+  padding: 0;
+  font-size: 11px;
+  color: var(--gray-text);
+  text-decoration: underline;
+  cursor: pointer;
+}
+.vs-crop-toggle:hover { color: var(--staples-red); }
+
+.vs-crop-modal {
+  position: fixed;
+  inset: 0;
+  background: rgba(0,0,0,0.6);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 10000;
+  padding: 20px;
+}
+.vs-crop-modal-inner { background: #fff; border-radius: 12px; padding: 20px; max-width: 480px; width: 100%; }
+.vs-crop-stage {
+  position: relative;
+  width: 100%;
+  height: 360px;
+  background: #111;
+  border-radius: 8px;
+  overflow: hidden;
+  cursor: crosshair;
+  user-select: none;
+}
+.vs-crop-stage img { width: 100%; height: 100%; object-fit: contain; pointer-events: none; }
+.vs-crop-box { position: absolute; border: 2px dashed #fff; background: rgba(255,255,255,0.15); pointer-events: none; }
+.vs-crop-hint { font-size: 12px; color: var(--gray-text); margin: 10px 0 0; }
+.vs-crop-modal-actions { display: flex; justify-content: flex-end; gap: 10px; margin-top: 14px; }
+.vs-crop-modal-actions button { border-radius: 18px; padding: 9px 16px; font-size: 13px; font-weight: 600; cursor: pointer; }
+#vs-crop-cancel { background: none; border: 1px solid var(--border); color: var(--gray-text); }
+#vs-crop-confirm { background: var(--staples-red); border: none; color: #fff; }
+#vs-crop-confirm:disabled { background: var(--border); color: var(--gray-text); cursor: not-allowed; }
+
+/* Global drag-to-search overlay (see wireGlobalImageDrop in app.js) */
+body.vs-dragging::after {
+  content: "Drop photo to search";
+  position: fixed;
+  inset: 0;
+  background: rgba(0,0,0,0.55);
+  color: #fff;
+  font-size: 26px;
+  font-weight: 700;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 9999;
+  pointer-events: none;
+}
 .vs-query-meta h1 { font-size: 24px; margin: 0 0 6px; }
 #vs-status { color: var(--ink); font-size: 15px; font-weight: 600; margin: 0 0 6px; }
 .vs-query-hint { color: var(--gray-text); font-size: 13px; margin: 0; }

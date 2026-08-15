@@ -423,6 +423,48 @@ def _do_visual_search(image_bytes, top_k, scope, refine_text=""):
     return {"cls": cls, "scoped": scoped, "matches": matches, "searched": searched}
 
 
+def _do_similar_search(sku, top_k):
+    """'Find similar' — query FROM an existing catalog product's own image
+    vector instead of an uploaded photo. No re-embedding needed (the vector
+    is already stored); reuses the same rank/display machinery as a real
+    visual search once it has a query vector. Returns None if sku is unknown,
+    else [(sku, display_score), ...] with the source product excluded."""
+    if DATA_BACKEND == "sql":
+        qvec = sql_repo.get_image_embedding(sku)
+        if qvec is None:
+            return None
+        qn = qvec / (np.linalg.norm(qvec) + 1e-8)
+        ranked = sql_repo.search_by_vector(qn.tolist(), category=None, k=top_k + 1)
+        return [(s, disp) for s, _rank_score, disp in ranked if s != sku][:top_k]
+    else:
+        i = _sku_row.get(sku)
+        if i is None:
+            return None
+        qn = _index_image_matrix[i] if _index_image_matrix.size else _index_matrix[i]
+        ranked = _rank(qn, top_k + 1)
+        disp = _display_scores(qn, [s for s, _ in ranked])
+        return [(s, disp.get(s, sc)) for s, sc in ranked if s != sku][:top_k]
+
+
+@app.get("/api/products/{sku}/similar")
+def similar_products(sku: str, top_k: int = 12):
+    """Visually similar products to an existing catalog item — powers "find
+    similar" on product cards/PDPs without requiring an upload."""
+    top_k = max(1, min(int(top_k), 50))
+    matches = _do_similar_search(sku, top_k)
+    if matches is None:
+        raise HTTPException(404, "Product not found")
+    by_sku = get_products_by_skus([s for s, _ in matches])
+    results = []
+    for s, score in matches:
+        p = by_sku.get(s)
+        if p:
+            item = _serialize(p)
+            item["match_score"] = round(score * 100, 1)
+            results.append(item)
+    return {"count": len(results), "items": results}
+
+
 @app.post("/api/visual-search")
 async def visual_search(request: Request, file: UploadFile = File(...),
                         top_k: int = config.TOP_K, scope: str = "auto", refine_text: str = ""):

@@ -271,6 +271,7 @@ function renderSiteFooter() {
 function renderSiteChrome() {
   renderSiteHeader();
   renderSiteFooter();
+  wireGlobalImageDrop();
 }
 
 // A handful of representative SKUs spanning categories, so the landing page
@@ -332,7 +333,13 @@ function productCardHTML(p, opts = {}) {
   return `
     <div class="product-card" data-sku="${p.sku}">
       ${matchBadge}
-      <a class="product-media" href="${href}"><img src="${esc(p.image_url)}" alt="${esc(p.name)}" loading="lazy" /></a>
+      <div class="product-media">
+        <a href="${href}"><img src="${esc(p.image_url)}" alt="${esc(p.name)}" loading="lazy" /></a>
+        <a class="find-similar-link" href="/visual-search.html?sku=${encodeURIComponent(p.sku)}" title="Find visually similar products">
+          <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/></svg>
+          Find similar
+        </a>
+      </div>
       <a class="product-name" href="${href}">${esc(p.name)}</a>
       <div class="stars">${starString(p.rating)} <span class="count">(${p.reviews})</span></div>
       <div class="price-row">
@@ -389,6 +396,30 @@ async function renderProductRail(elId, { category, limit = 12, offset = 0 } = {}
     wireProductCardInteractions(el);
   } catch (e) {
     el.innerHTML = `<div class="state-msg">${e.message}. Please refresh.</div>`;
+  }
+}
+
+// Visual-similarity rail for the PDP — queries FROM an existing product's own
+// vector (see /api/products/{sku}/similar). maxPrice, if given, filters to
+// strictly-cheaper visually-similar items ("similar for less"); the whole
+// section is removed (not left empty) if nothing qualifies.
+async function renderSimilarRail(elId, sku, { maxPrice, limit = 12 } = {}) {
+  const el = document.getElementById(elId);
+  if (!el) return;
+  el.innerHTML = `<div class="state-msg"><div class="spinner"></div>Loading…</div>`;
+  try {
+    const topK = maxPrice != null ? 40 : limit;   // fetch deeper when filtering, since some won't qualify
+    const res = await fetch(`${API_BASE}/api/products/${encodeURIComponent(sku)}/similar?top_k=${topK}`);
+    if (!res.ok) throw new Error("Could not load similar products");
+    const data = await res.json();
+    let items = data.items || [];
+    if (maxPrice != null) items = items.filter(p => p.price < maxPrice);
+    items = items.slice(0, limit);
+    if (!items.length) { el.closest("section")?.remove(); return; }
+    el.innerHTML = items.map(p => productCardHTML(p)).join("");
+    wireProductCardInteractions(el);
+  } catch (e) {
+    el.closest("section")?.remove();
   }
 }
 
@@ -688,7 +719,198 @@ function renderCategoryChip(data) {
   });
 }
 
+// "Find similar" entry point (product cards / PDP link to
+// visual-search.html?sku=...) — queries FROM an existing catalog product's
+// own vector instead of an uploaded photo. No file, no embedding call.
+async function runSimilarSearch(sku) {
+  const statusEl = document.getElementById("vs-status");
+  const grid = document.getElementById("listing-grid");
+  const thumb = document.getElementById("query-thumb");
+  const hint = document.querySelector(".vs-query-hint");
+  const chip = document.getElementById("vs-category-chip");
+  const refineMount = document.getElementById("vs-refine");
+  const statsEl = document.getElementById("vs-stats");
+
+  if (chip) chip.hidden = true;
+  if (refineMount) refineMount.innerHTML = "";   // text refinement needs a photo query, not a stored-product one
+  statusEl.textContent = "Finding similar products…";
+  _clearVsExtra();
+  grid.innerHTML = `<div class="state-msg"><div class="spinner"></div>Finding similar products…</div>`;
+
+  try {
+    const pRes = await fetch(`${API_BASE}/api/products/${encodeURIComponent(sku)}`);
+    if (!pRes.ok) throw new Error("Product not found");
+    const product = await pRes.json();
+    if (thumb) thumb.src = product.image_url;
+    if (hint) hint.textContent = `Products that visually match "${product.name}".`;
+
+    const t0 = performance.now();
+    const res = await fetch(`${API_BASE}/api/products/${encodeURIComponent(sku)}/similar`);
+    if (!res.ok) throw new Error("Could not find similar products");
+    const data = await res.json();
+    const tookMs = Math.round(performance.now() - t0);
+
+    if (statsEl) statsEl.textContent = data.count ? `Found ${data.count} similar products in ${tookMs}ms` : "";
+    if (data.count) {
+      statusEl.textContent = `Found ${data.count} similar product${data.count === 1 ? "" : "s"}`;
+      grid.innerHTML = data.items.map(p => productCardHTML(p)).join("");
+      wireProductCardInteractions(grid);
+    } else {
+      statusEl.textContent = "No similar products found";
+      grid.innerHTML = `<div class="state-msg">Couldn't find anything visually similar to this product.</div>`;
+    }
+  } catch (e) {
+    statusEl.textContent = "Something went wrong.";
+    grid.innerHTML = `<div class="state-msg">${e.message}.</div>`;
+  }
+}
+
+// ---------- Crop-to-search ----------
+// Lets the user draw a box over their uploaded photo and search using just
+// that region — solves the multi-object case (a room photo with a sofa AND
+// a lamp) a single whole-image embed can't disentangle, with no new model:
+// crop client-side on a canvas, then re-embed the crop through the exact
+// same endpoint as a normal upload.
+let _cropModalBuilt = false;
+let _cropRect = null;   // {x,y,w,h} in the crop-stage's rendered pixel space
+
+function _buildCropModal() {
+  if (_cropModalBuilt) return;
+  _cropModalBuilt = true;
+  const modal = document.createElement("div");
+  modal.id = "vs-crop-modal";
+  modal.className = "vs-crop-modal";
+  modal.hidden = true;
+  modal.innerHTML = `
+    <div class="vs-crop-modal-inner">
+      <div class="vs-crop-stage" id="vs-crop-stage">
+        <img id="vs-crop-img" alt="" draggable="false" />
+        <div id="vs-crop-box" class="vs-crop-box" hidden></div>
+      </div>
+      <p class="vs-crop-hint">Drag a box around just the item you want to search for.</p>
+      <div class="vs-crop-modal-actions">
+        <button id="vs-crop-cancel" type="button">Cancel</button>
+        <button id="vs-crop-confirm" type="button" disabled>Search this crop</button>
+      </div>
+    </div>`;
+  document.body.appendChild(modal);
+
+  const stage = modal.querySelector("#vs-crop-stage");
+  const box = modal.querySelector("#vs-crop-box");
+  const confirmBtn = modal.querySelector("#vs-crop-confirm");
+  let dragging = false, startX = 0, startY = 0;
+
+  stage.addEventListener("mousedown", (e) => {
+    const r = stage.getBoundingClientRect();
+    startX = e.clientX - r.left;
+    startY = e.clientY - r.top;
+    dragging = true;
+    box.hidden = false;
+    Object.assign(box.style, { left: `${startX}px`, top: `${startY}px`, width: "0px", height: "0px" });
+    confirmBtn.disabled = true;
+    e.preventDefault();
+  });
+  window.addEventListener("mousemove", (e) => {
+    if (!dragging) return;
+    const r = stage.getBoundingClientRect();
+    const curX = Math.max(0, Math.min(e.clientX - r.left, r.width));
+    const curY = Math.max(0, Math.min(e.clientY - r.top, r.height));
+    const x = Math.min(startX, curX), y = Math.min(startY, curY);
+    const w = Math.abs(curX - startX), h = Math.abs(curY - startY);
+    Object.assign(box.style, { left: `${x}px`, top: `${y}px`, width: `${w}px`, height: `${h}px` });
+    _cropRect = { x, y, w, h };
+  });
+  window.addEventListener("mouseup", () => {
+    if (!dragging) return;
+    dragging = false;
+    confirmBtn.disabled = !_cropRect || _cropRect.w < 20 || _cropRect.h < 20;
+  });
+
+  modal.querySelector("#vs-crop-cancel").addEventListener("click", () => { modal.hidden = true; });
+
+  confirmBtn.addEventListener("click", () => {
+    const img = modal.querySelector("#vs-crop-img");
+    const stageRect = stage.getBoundingClientRect();
+    // Map the drawn box (rendered-pixel space) back to the image's natural
+    // pixel space. The <img> is object-fit:contain inside the stage, so it's
+    // letterboxed — account for that offset/scale rather than assuming 1:1.
+    const scale = Math.min(stageRect.width / img.naturalWidth, stageRect.height / img.naturalHeight);
+    const dispW = img.naturalWidth * scale, dispH = img.naturalHeight * scale;
+    const offX = (stageRect.width - dispW) / 2, offY = (stageRect.height - dispH) / 2;
+    const sx = Math.max(0, (_cropRect.x - offX) / scale);
+    const sy = Math.max(0, (_cropRect.y - offY) / scale);
+    const sw = Math.min(img.naturalWidth - sx, _cropRect.w / scale);
+    const sh = Math.min(img.naturalHeight - sy, _cropRect.h / scale);
+    if (sw < 4 || sh < 4) return;
+
+    const canvas = document.createElement("canvas");
+    canvas.width = sw; canvas.height = sh;
+    canvas.getContext("2d").drawImage(img, sx, sy, sw, sh, 0, 0, sw, sh);
+    canvas.toBlob((blob) => {
+      if (!blob) return;
+      modal.hidden = true;
+      runVisualSearch(new File([blob], "crop.png", { type: "image/png" }), { refineText: "" });
+    }, "image/png");
+  });
+}
+
+function openCropToSearch() {
+  const src = document.getElementById("query-thumb")?.src;
+  if (!src) return;
+  _buildCropModal();
+  const modal = document.getElementById("vs-crop-modal");
+  modal.querySelector("#vs-crop-img").src = src;
+  const box = modal.querySelector("#vs-crop-box");
+  box.hidden = true;
+  _cropRect = null;
+  modal.querySelector("#vs-crop-confirm").disabled = true;
+  modal.hidden = false;
+}
+
+function wireCropToggle(buttonId) {
+  document.getElementById(buttonId)?.addEventListener("click", openCropToSearch);
+}
+
+// ---------- Global image drop / paste-to-search ----------
+// Works on every page (wired from renderSiteChrome) — drag an image file
+// anywhere on the site, or paste one from the clipboard, and it runs the
+// same search an upload would.
+function wireGlobalImageDrop() {
+  let dragDepth = 0;
+  window.addEventListener("dragenter", (e) => {
+    if (![...(e.dataTransfer?.types || [])].includes("Files")) return;
+    dragDepth++;
+    document.body.classList.add("vs-dragging");
+  });
+  window.addEventListener("dragleave", () => {
+    dragDepth = Math.max(0, dragDepth - 1);
+    if (dragDepth === 0) document.body.classList.remove("vs-dragging");
+  });
+  window.addEventListener("dragover", (e) => {
+    if ([...(e.dataTransfer?.types || [])].includes("Files")) e.preventDefault();
+  });
+  window.addEventListener("drop", (e) => {
+    dragDepth = 0;
+    document.body.classList.remove("vs-dragging");
+    const file = e.dataTransfer?.files?.[0];
+    if (file && file.type.startsWith("image/")) {
+      e.preventDefault();
+      startVisualSearch(file);
+    }
+  });
+  window.addEventListener("paste", (e) => {
+    const item = [...(e.clipboardData?.items || [])].find(i => i.type && i.type.startsWith("image/"));
+    if (item) {
+      const file = item.getAsFile();
+      if (file) startVisualSearch(file);
+    }
+  });
+}
+
 function renderVisualSearchResultsPage() {
+  const skuParam = new URLSearchParams(location.search).get("sku");
+  if (skuParam) { runSimilarSearch(skuParam); return; }
+
   const thumb = document.getElementById("query-thumb");
   const dataUrl = sessionStorage.getItem("vsQueryImage");
   if (dataUrl) {
@@ -742,7 +964,13 @@ async function renderProductDetail(elId) {
         <span>${esc(p.name)}</span>
       </nav>
       <div class="pdp">
-        <div class="pdp-media"><img src="${esc(p.image_url)}" alt="${esc(p.name)}" /></div>
+        <div class="pdp-media">
+          <img src="${esc(p.image_url)}" alt="${esc(p.name)}" />
+          <a class="pdp-find-similar" href="/visual-search.html?sku=${encodeURIComponent(p.sku)}">
+            <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/></svg>
+            Find visually similar
+          </a>
+        </div>
         <div class="pdp-info">
           <p class="pdp-brand">${esc(p.brand || "Staples")}</p>
           <h1 class="pdp-name">${esc(p.name)}</h1>
@@ -782,8 +1010,11 @@ async function renderProductDetail(elId) {
       setTimeout(() => { addBtn.textContent = "Add to Cart"; addBtn.classList.remove("added"); }, 1200);
     });
 
-    // "You may also like" — same category
-    renderProductRail("related-rail", { category: p.category });
+    // "You may also like" — real visual similarity (this product's own
+    // vector), not just same-category. "Similar for less" reuses the same
+    // neighborhood, filtered to strictly cheaper items.
+    renderSimilarRail("related-rail", p.sku);
+    renderSimilarRail("cheaper-rail", p.sku, { maxPrice: p.price });
   } catch (e) {
     el.innerHTML = `<div class="state-msg">${e.message}. <a href="/">Back to home</a></div>`;
   }
