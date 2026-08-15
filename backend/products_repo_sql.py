@@ -169,7 +169,7 @@ def search_products(query):
 # Vector search — this is what DATA_BACKEND=sql actually changes vs. memory
 # --------------------------------------------------------------------------
 
-def search_by_vector(query_vec, category=None, k=8):
+def search_by_vector(query_vec, category=None, k=8, restrict_skus=None):
     """pgvector similarity search. RANKS by the fused `embedding` column
     (HNSW-indexed) and, for the SAME already-ranked rows, also returns a
     pure-image `display_score` from `image_embedding` — one query computes
@@ -178,8 +178,14 @@ def search_by_vector(query_vec, category=None, k=8):
     compressed ~60% a fused-vs-fused-style score would show).
 
     Returns [(sku, rank_score, display_score), ...] sorted by rank_score desc.
-    query_vec: a 1-D array/list, pure-image (the query is always pure-image —
-    a user only supplies a photo, never text).
+    query_vec: a 1-D array/list — pure-image for a normal search, or an
+        image+text BLEND for a text-refined query (see main.py's
+        _search_matches, which always pairs a blended query_vec here with
+        restrict_skus so the refinement can only reorder an already
+        photo-relevant pool, never search the whole catalog with it).
+    restrict_skus: optional iterable of skus to limit the search to (a small
+        pool, so the HNSW index isn't needed/used for this call — a plain
+        sequential scan over ~100 rows is trivially fast).
     """
     with SessionLocal() as s:
         # HNSW is approximate: pgvector's default hnsw.ef_search=40 explores
@@ -199,6 +205,8 @@ def search_by_vector(query_vec, category=None, k=8):
         )
         if category is not None:
             stmt = stmt.where(Product.category == category)
+        if restrict_skus is not None:
+            stmt = stmt.where(Product.sku.in_(list(restrict_skus)))
         rows = s.execute(stmt).all()
         return [(r.sku, float(r.rank_score), float(r.display_score)) for r in rows]
 
