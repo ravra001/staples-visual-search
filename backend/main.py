@@ -29,7 +29,7 @@ from products_data import (
     search_products,
     catalog_content_hash,
 )
-from embeddings import BACKEND as EMBEDDING_BACKEND, embed_image, embed_catalog_item
+from embeddings import BACKEND as EMBEDDING_BACKEND, embed_image, embed_catalog_item, embed_text_clip
 
 # When DATA_BACKEND=sql, vector search happens IN POSTGRES (pgvector) instead
 # of the in-memory NumPy matrix below — see _do_visual_search and
@@ -368,11 +368,26 @@ def app_config():
 _MAX_UPLOAD_BYTES = int(config.MAX_UPLOAD_MB * 1024 * 1024)
 
 
-def _do_visual_search(image_bytes, top_k, scope):
+REFINE_IMAGE_WEIGHT = 0.7  # query-side image/text blend when refine_text is given
+
+
+def _do_visual_search(image_bytes, top_k, scope, refine_text=""):
     """CPU-bound work — embed + classify + rank. Runs in a threadpool so it never
     blocks the event loop (see the endpoint)."""
     query_vec = embed_image(image_bytes)
     qn = query_vec / (np.linalg.norm(query_vec) + 1e-8)   # normalize the query ONCE
+
+    # Text-refined query ("but in black", "cheaper leather version"): blend the
+    # photo's embedding with a CLIP text embedding of the refinement, in the
+    # SAME joint space embed_catalog_item() already fuses catalog vectors in —
+    # this is that same trick, applied on the query side instead. Everything
+    # downstream (classification, ranking, the SQL backend's single query)
+    # just sees one blended qn and needs no other change.
+    if refine_text and EMBEDDING_BACKEND == "clip":
+        text_vec = embed_text_clip(refine_text[:200])
+        tn = text_vec / (np.linalg.norm(text_vec) + 1e-8)
+        qn = REFINE_IMAGE_WEIGHT * qn + (1 - REFINE_IMAGE_WEIGHT) * tn
+        qn = qn / (np.linalg.norm(qn) + 1e-8)
 
     cls = _classify(qn) if config.CLASSIFIER_ENABLED else None
     category, scoped = None, False
@@ -410,17 +425,21 @@ def _do_visual_search(image_bytes, top_k, scope):
 
 @app.post("/api/visual-search")
 async def visual_search(request: Request, file: UploadFile = File(...),
-                        top_k: int = config.TOP_K, scope: str = "auto"):
+                        top_k: int = config.TOP_K, scope: str = "auto", refine_text: str = ""):
     """Visual search with soft category scoping.
 
     scope: "auto"  (default) — scope to the predicted category only when confident
            "all"   — never scope (search the whole catalog)
            "force" — always scope to the predicted category
+    refine_text: optional free-text refinement ("but in black", "cheaper") —
+        blended into the query embedding before ranking. Only has an effect
+        on the clip backend (silently ignored otherwise, see _do_visual_search).
     """
     if not file.content_type or not file.content_type.startswith("image/"):
         raise HTTPException(400, "Please upload an image file")
 
     top_k = max(1, min(int(top_k), 100))   # a negative/huge top_k previously returned the whole catalog
+    refine_text = (refine_text or "").strip()
 
     # Reject clearly-oversized uploads up front (before reading the body).
     clen = request.headers.get("content-length")
@@ -433,10 +452,12 @@ async def visual_search(request: Request, file: UploadFile = File(...),
     if len(image_bytes) > _MAX_UPLOAD_BYTES:
         raise HTTPException(413, f"Image too large (limit {config.MAX_UPLOAD_MB:g} MB)")
 
+    _t0 = time.time()
     try:
-        r = await run_in_threadpool(_do_visual_search, image_bytes, top_k, scope)
+        r = await run_in_threadpool(_do_visual_search, image_bytes, top_k, scope, refine_text)
     except Exception as e:
         raise HTTPException(400, f"Could not process image: {e}")
+    took_ms = round((time.time() - _t0) * 1000)
 
     cls, matches = r["cls"], r["matches"]
     by_sku = get_products_by_skus([sku for sku, _ in matches])   # single batch fetch (no N+1)
@@ -456,6 +477,8 @@ async def visual_search(request: Request, file: UploadFile = File(...),
         "category_ranking": cls["ranking"] if cls else None,
         "scoped": r["scoped"],
         "searched": r["searched"],   # how many vectors were actually ranked
+        "took_ms": took_ms,          # embed + rank time (excludes upload/network)
+        "refine_text": refine_text or None,
         "match_threshold": config.MATCH_THRESHOLD,   # results below this % are "weak"
         # "image" = displayed % is pure-image cosine (match_threshold's calibrated
         # scale); "fused" = no valid image_vecs this boot, displayed % is the raw
