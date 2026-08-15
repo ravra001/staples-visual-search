@@ -174,24 +174,41 @@ interface is identical, so nothing downstream changes. This is also why real pro
 photography only pays off once a learned backend is active: the heuristic is tuned to
 clean studio shapes.
 
-## Moving to GCP (per the hackathon architecture doc)
+## Moving to GCP (per the architecture doc)
 
-Both swap points are now **implemented as selectable backends** (see the Backends
-table above) — moving to GCP is a matter of flipping env vars and supplying creds,
-not rewriting code:
+Both swap points are **implemented as selectable backends** (see the Backends
+table above) — moving to GCP is a matter of flipping config, not rewriting code:
 
-- **Cloud SQL** — `DATA_BACKEND=sql` + `DATABASE_URL`. The Postgres repository lives
-  in `products_repo_sql.py` (SQLAlchemy). Seed it once:
+- **Cloud SQL + pgvector** — `DATA_BACKEND=sql` + `DATABASE_URL`. The Postgres
+  repository (`products_repo_sql.py`, SQLAlchemy + `pgvector-python`) stores BOTH
+  the catalog rows and their vectors — a `products` table with `embedding` (fused,
+  HNSW-indexed, used for ranking) and `image_embedding` (pure-image, used for the
+  same dual-score display the memory backend does) columns. Vector search runs
+  *inside Postgres* via pgvector's `<=>` cosine-distance operator
+  (`search_by_vector()`) — `main.py` routes there instead of the in-memory matrix
+  whenever this backend is active; the in-memory index isn't built at all.
+
+  Try it locally first (no Cloud SQL needed — `docker-compose.yml` ships a local
+  pgvector instance):
   ```bash
-  DATA_BACKEND=sql DATABASE_URL=... python -c "import products_repo_sql as r; r.init_and_seed()"
+  docker compose up -d
+  pip install -r requirements-ml.txt   # adds pgvector-python
+  cd backend
+  DATABASE_URL=postgresql+psycopg://staples:staples@localhost:5432/staples \
+    python -c "import products_repo_sql as r; r.init_and_seed(reuse_vectors_from='data/index_clip.npz')"
   ```
-- **Vertex AI Multimodal Embeddings** — `EMBEDDING_BACKEND=vertex` + `GCP_PROJECT`.
-  Returns a 1408-dim vector; `cosine_similarity()` / `top_k_matches()` are unchanged
-  (they're dimension-agnostic). For a catalog this small, brute-force `top_k_matches()`
-  over the in-memory index is still the right call — no need for Vertex AI Vector
-  Search / Matching Engine until brute force stops being instant.
+  `reuse_vectors_from` reuses the vectors your in-memory index already computed —
+  seeding 10k products takes well under a second instead of re-embedding. Then set
+  `data.backend: sql` (config.yaml) or `DATA_BACKEND=sql` and run the app normally.
 
-`main.py`, all of `frontend/`, and the whole upload UX carry over unchanged.
+- **Vertex AI Multimodal Embeddings** — `EMBEDDING_BACKEND=vertex` + `GCP_PROJECT`.
+  Returns a 1408-dim vector; the pgvector schema's vector width is derived from
+  `embeddings.embedding_dim()`, so it adapts automatically. For a 10k–50k catalog,
+  brute-force pgvector (or even the in-memory matrix) is still the right call — no
+  need for Vertex AI Vector Search / Matching Engine until that stops being instant.
+
+`main.py`'s product-lookup endpoints, all of `frontend/`, and the whole upload UX
+carry over unchanged regardless of which backend is active.
 
 ## Supplying real product images
 

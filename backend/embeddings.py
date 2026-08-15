@@ -69,6 +69,28 @@ BACKEND = config.EMBEDDING_BACKEND
 # + 16 edge bins. (Other backends have their own, larger dimensionality.)
 HEURISTIC_DIM = 59
 
+# Known output dims per CLIP architecture (a property of the model, not the
+# pretrained weights) — lets us declare a fixed-width pgvector column without
+# having to load the model just to ask it its own output shape.
+_CLIP_DIMS = {
+    "ViT-B-32": 512, "ViT-B-16": 512, "ViT-L-14": 768, "ViT-L-14-336": 768,
+    "ViT-H-14": 1024, "ViT-g-14": 1024, "ViT-bigG-14": 1280,
+}
+VERTEX_DIM = 1408  # multimodalembedding@001's fixed output size
+
+
+def embedding_dim() -> int:
+    """Output dimensionality of the ACTIVE backend. Needed to declare a
+    fixed-width pgvector column (Postgres, unlike a NumPy array, needs the
+    vector width known at CREATE TABLE time, not just at insert time)."""
+    if BACKEND == "heuristic":
+        return HEURISTIC_DIM
+    if BACKEND == "clip":
+        return _CLIP_DIMS.get(config.CLIP_MODEL, 512)
+    if BACKEND == "vertex":
+        return VERTEX_DIM
+    raise RuntimeError(f"Unknown EMBEDDING_BACKEND={BACKEND!r}")
+
 
 def _load_image(image_bytes: bytes) -> Image.Image:
     return Image.open(io.BytesIO(image_bytes)).convert("RGB")

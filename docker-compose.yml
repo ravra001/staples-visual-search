@@ -1,0 +1,35 @@
+# Local Postgres + pgvector, for testing DATA_BACKEND=sql without touching
+# Cloud SQL. Not used by the default (memory) backend — entirely optional.
+#
+# Usage:
+#   docker compose up -d
+#   pip install -r requirements-ml.txt   # or: uv sync --extra sql
+#   cd backend
+#   DATABASE_URL=postgresql+psycopg://staples:staples@localhost:5432/staples \
+#     python -c "import products_repo_sql as r; r.init_and_seed(reuse_vectors_from='data/index_clip.npz')"
+#   # then run the app with data.backend: sql (config.yaml) or DATA_BACKEND=sql
+#
+# The pgvector/pgvector image ships Postgres with the pgvector extension
+# precompiled — no manual extension build needed (this is the whole reason to
+# use Docker here instead of a bare `postgres` image + hand-compiling pgvector,
+# which requires a C toolchain and is fragile on Windows without WSL2).
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: staples
+      POSTGRES_PASSWORD: staples
+      POSTGRES_DB: staples
+    ports:
+      - "5432:5432"
+    volumes:
+      - staples_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U staples -d staples"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  staples_pgdata:
