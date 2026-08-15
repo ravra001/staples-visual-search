@@ -19,3 +19,4 @@ backend/models/
 backend/static/images/multiview/
 backend/data/catalog_multiview*.json
 backend/data/index_multiview*.npz
+backend/data/index_compare.npz
