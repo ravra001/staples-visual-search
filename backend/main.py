@@ -36,13 +36,24 @@ CACHE_DIR = os.path.join(BASE_DIR, "data")
 FRONTEND_DIR = os.path.join(os.path.dirname(BASE_DIR), "frontend")
 
 # ---- catalog vector index (loaded once at startup) ----
-# The index is held as ONE contiguous, L2-normalized matrix + parallel arrays,
-# so a query ranks the whole catalog with a single matmul (see _rank) instead of
-# a Python loop. Vectors are normalized once here, never per request.
-_index_skus = np.empty(0, dtype=object)   # (N,)  sku per row
-_index_matrix = np.empty((0, 0), np.float32)  # (N, D) L2-normalized
+# Two aligned matrices, same row order:
+#   _index_matrix       — fused (image+text) vectors, used for RANKING (see
+#                          _rank). Validated to beat image-only recall.
+#   _index_image_matrix — pure-image vectors, used only to compute a DISPLAY
+#                          score (see _display_scores). A pure-image query
+#                          naturally scores lower against a fused vector than
+#                          against a pure-image one (fusion pulls the catalog
+#                          vector toward text-embedding space), so showing the
+#                          fused score directly reads as misleadingly low.
+#                          Ranking never uses this matrix — only what's shown.
+# Both held as contiguous, L2-normalized matrices so a query is one matmul
+# (see _rank / _display_scores) instead of a Python loop.
+_index_skus = np.empty(0, dtype=object)         # (N,)  sku per row
+_index_matrix = np.empty((0, 0), np.float32)    # (N, D) L2-normalized, fused
+_index_image_matrix = np.empty((0, 0), np.float32)  # (N, D) L2-normalized, pure image
 _index_cats = np.empty(0, dtype=object)   # (N,)  category per row
 _sku_category = {}                        # sku -> category
+_sku_row = {}                             # sku -> row index (for _display_scores lookup)
 CONF_THRESHOLD = config.CONF_THRESHOLD    # % — only auto-scope above this confidence
 _SOFTMAX_T = config.SOFTMAX_T             # temperature: sharpens cosine sims into probabilities
 
@@ -64,14 +75,14 @@ def _normalize_rows(m):
 
 
 def _build_catalog_index():
-    global _index_skus, _index_matrix, _index_cats
+    global _index_skus, _index_matrix, _index_image_matrix, _index_cats
     start = time.time()
     products = [p for p in get_all_products() if os.path.exists(_image_path(p))]
     want = {p["sku"] for p in products}
     cat_of = {p["sku"]: p["category"] for p in get_all_products()}
     fp = config.index_fingerprint()
 
-    skus = vecs = None
+    skus = vecs = image_vecs = None
     cache = _cache_path()
     if os.path.exists(cache):
         data = np.load(cache, allow_pickle=True)
@@ -84,7 +95,11 @@ def _build_catalog_index():
                   f"{cached_fp!r}, but this process is {fp!r}. Ignoring stale cache.")
         elif want.issubset(set(cached_skus)):
             skus, vecs = cached_skus, data["vecs"]
-            print(f"[startup] loaded {len(skus)} vectors from cache ({fp}) in {time.time() - start:.2f}s")
+            # image_vecs is optional (older caches predate dual-vector storage);
+            # display score gracefully falls back to the fused score without it.
+            image_vecs = data["image_vecs"] if "image_vecs" in data else None
+            print(f"[startup] loaded {len(skus)} vectors from cache ({fp}) in {time.time() - start:.2f}s"
+                  f"{'' if image_vecs is not None else ' (no image_vecs — display score will use fused)'}")
 
     if skus is None:
         # Cache miss / stale / partial. In production this must not happen — a
@@ -94,29 +109,35 @@ def _build_catalog_index():
                 f"No valid prebuilt index for {fp} at {cache} and index.require_prebuilt=true. "
                 f"Build it offline with build_index.py and ship it."
             )
-        skus, out = [], []
+        skus, fused_out, image_out = [], [], []
         for p in products:
             # embed_catalog_item fuses in name/brand/description when
             # embedding.text_fusion is enabled (clip only); falls back to plain
             # embed_image() otherwise. The live query path below always stays
             # on plain embed_image() — only catalog vectors are fused.
             with open(_image_path(p), "rb") as f:
-                out.append(embed_catalog_item(f.read(), name=p.get("name", ""),
-                                               brand=p.get("brand", ""), description=p.get("description", "")))
+                fused, img = embed_catalog_item(f.read(), name=p.get("name", ""), brand=p.get("brand", ""),
+                                                 description=p.get("description", ""), return_image_vec=True)
+            fused_out.append(fused)
+            image_out.append(img)
             skus.append(p["sku"])
-        vecs = np.array(out, dtype=np.float32) if out else np.empty((0, 0), np.float32)
+        vecs = np.array(fused_out, dtype=np.float32) if fused_out else np.empty((0, 0), np.float32)
+        image_vecs = np.array(image_out, dtype=np.float32) if image_out else np.empty((0, 0), np.float32)
         if len(skus):
             os.makedirs(CACHE_DIR, exist_ok=True)
-            np.savez(cache, skus=np.array(skus, dtype=object), vecs=vecs,
+            np.savez(cache, skus=np.array(skus, dtype=object), vecs=vecs, image_vecs=image_vecs,
                      fingerprint=np.array([fp], dtype=object))
         print(f"[startup] embedded {len(skus)} images ({fp}) in {time.time() - start:.2f}s (cached)")
 
     _index_skus = np.array(skus, dtype=object)
     _index_matrix = _normalize_rows(vecs) if len(skus) else np.empty((0, 0), np.float32)
+    _index_image_matrix = _normalize_rows(image_vecs) if image_vecs is not None and len(skus) else np.empty((0, 0), np.float32)
     _index_cats = np.array([cat_of.get(s, "") for s in skus], dtype=object)
     _sku_category.update({s: cat_of.get(s, "") for s in skus})
+    _sku_row.clear()
+    _sku_row.update({s: i for i, s in enumerate(skus)})
     print(f"[startup] backends: embedding={EMBEDDING_BACKEND}, data={DATA_BACKEND} — "
-          f"index ready: {_index_matrix.shape}")
+          f"index ready: {_index_matrix.shape} (display scores: {'pure-image' if _index_image_matrix.size else 'fused (no image_vecs)'})")
 
 
 # ---- soft category classifier (nearest-centroid over the catalog vectors) ----
@@ -176,6 +197,22 @@ def _rank(qn_vec, k, category=None):
     top = np.argpartition(-scores, k - 1)[:k]  # unordered top-k
     top = top[np.argsort(-scores[top])]        # order them
     return [(str(skus[i]), float(scores[i])) for i in top]
+
+
+def _display_scores(qn_vec, skus):
+    """Pure-image cosine for the given skus, for DISPLAY only — ranking always
+    uses the fused index (_rank), never this. Falls back silently (empty dict,
+    caller keeps the fused score) if pure-image vectors aren't available
+    (e.g. an older cache, or the heuristic/vertex backends with fusion off).
+    Cheap: only computed for the small returned top-k, not the whole catalog."""
+    if _index_image_matrix.size == 0:
+        return {}
+    out = {}
+    for s in skus:
+        i = _sku_row.get(s)
+        if i is not None:
+            out[s] = float(_index_image_matrix[i] @ qn_vec)
+    return out
 
 
 @asynccontextmanager
@@ -280,6 +317,14 @@ def _do_visual_search(image_bytes, top_k, scope):
     if scoped and not matches:                # empty scoped result → fall back to full search
         category, scoped = None, False
         matches = _rank(qn, top_k)
+
+    # RANKING (order + which items) always comes from the fused score above —
+    # that's what the recall eval validated. What's DISPLAYED (and what the
+    # match-threshold gate below reacts to) is the pure-image score instead:
+    # more interpretable, since a pure-image query naturally scores lower
+    # against a fused catalog vector than against a pure-image one.
+    disp = _display_scores(qn, [s for s, _ in matches])
+    matches = [(s, disp.get(s, fused_score)) for s, fused_score in matches]
 
     searched = int((_index_cats == category).sum()) if category is not None else int(_index_skus.shape[0])
     return {"cls": cls, "scoped": scoped, "matches": matches, "searched": searched}
