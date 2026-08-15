@@ -51,6 +51,8 @@ CLIP_MODEL = _val("CLIP_MODEL", "embedding.clip.model", "ViT-B-32")
 CLIP_PRETRAINED = _val("CLIP_PRETRAINED", "embedding.clip.pretrained", "laion2b_s34b_b79k")
 CLIP_CACHE_DIR = _val("CLIP_CACHE_DIR", "embedding.clip.cache_dir", "models/hf")
 CLIP_OFFLINE = str(_val("CLIP_OFFLINE", "embedding.clip.offline", "auto")).lower()
+TEXT_FUSION_ENABLED = bool(_yaml("embedding.text_fusion.enabled", False))
+TEXT_FUSION_IMAGE_WEIGHT = float(_val("TEXT_FUSION_IMAGE_WEIGHT", "embedding.text_fusion.image_weight", 0.3))
 GCP_PROJECT = _val("GCP_PROJECT", "embedding.vertex.project", None)
 GCP_LOCATION = _val("GCP_LOCATION", "embedding.vertex.location", "us-central1")
 
@@ -79,10 +81,13 @@ CORS_ORIGINS = _yaml("server.cors_origins", ["*"]) or ["*"]
 
 
 def index_fingerprint():
-    """Identity of the model an index was built with. A change here means the
-    cached vectors are incompatible and must not be ranked against."""
+    """Identity of the model (+ fusion config) an index was built with. A change
+    here means the cached vectors are incompatible and must not be ranked
+    against — this covers the model itself AND catalog-side text fusion, since
+    a fused index is not comparable to an image-only one."""
+    fusion = f":fusion={TEXT_FUSION_IMAGE_WEIGHT:g}" if TEXT_FUSION_ENABLED else ""
     if EMBEDDING_BACKEND == "clip":
-        return f"clip:{CLIP_MODEL}:{CLIP_PRETRAINED}"
+        return f"clip:{CLIP_MODEL}:{CLIP_PRETRAINED}{fusion}"
     if EMBEDDING_BACKEND == "vertex":
-        return "vertex:multimodalembedding@001"
+        return f"vertex:multimodalembedding@001{fusion}"
     return "heuristic:v1"

@@ -14,3 +14,8 @@ venv/
 # Not stored in git. It auto-downloads on the first CLIP run, or copy the
 # backend/models/ folder in manually for a fully-offline install.
 backend/models/
+
+# Multi-angle / text-fusion experiments (regenerable)
+backend/static/images/multiview/
+backend/data/catalog_multiview*.json
+backend/data/index_multiview*.npz

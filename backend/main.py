@@ -28,7 +28,7 @@ from products_data import (
     get_products_by_category,
     search_products,
 )
-from embeddings import BACKEND as EMBEDDING_BACKEND, embed_image
+from embeddings import BACKEND as EMBEDDING_BACKEND, embed_image, embed_catalog_item
 
 BASE_DIR = os.path.dirname(__file__)
 IMAGES_DIR = os.path.join(BASE_DIR, "static", "images", "products")
@@ -96,8 +96,13 @@ def _build_catalog_index():
             )
         skus, out = [], []
         for p in products:
+            # embed_catalog_item fuses in name/brand/description when
+            # embedding.text_fusion is enabled (clip only); falls back to plain
+            # embed_image() otherwise. The live query path below always stays
+            # on plain embed_image() — only catalog vectors are fused.
             with open(_image_path(p), "rb") as f:
-                out.append(embed_image(f.read()))
+                out.append(embed_catalog_item(f.read(), name=p.get("name", ""),
+                                               brand=p.get("brand", ""), description=p.get("description", "")))
             skus.append(p["sku"])
         vecs = np.array(out, dtype=np.float32) if out else np.empty((0, 0), np.float32)
         if len(skus):

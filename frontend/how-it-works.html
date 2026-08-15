@@ -79,12 +79,17 @@
     <p class="arch-lead"><b>Embedding the catalog</b> is a one-time batch job, <code>build_index.py</code>:</p>
     <ol class="doc-steps">
       <li>Loop every product that has an image file.</li>
-      <li>Call <code>embed_image(bytes)</code> — open the image, run CLIP's <code>preprocess</code>
-          (resize 224×224, color-normalize), then <code>model.encode_image()</code> → a raw
-          <strong>512-dim vector</strong>, then <strong>L2-normalize</strong> it to length 1.0.</li>
-      <li>Stack all 10,000 vectors and save <code>index_clip.npz</code>: the SKUs, the
-          <code>(10000, 512)</code> matrix, and a <code>fingerprint</code>
-          (<code>clip:ViT-B-32:laion2b_s34b_b79k</code> — the model identity).</li>
+      <li>Call <code>embed_catalog_item(bytes, name, brand, description)</code> — embeds the image with CLIP
+          (resize 224×224, color-normalize, <code>encode_image()</code> → 512-dim), then <strong>fuses in
+          the product's text</strong> via CLIP's text tower (same joint space):
+          <code>fused = normalize(0.3 × image_vec + 0.7 × text_vec)</code>. A held-out recall eval showed
+          this beats image-only by <strong>+8 points recall@1</strong> — text disambiguates visually similar
+          products (e.g. chair vs. stool vs. ottoman) that a photo alone can't. The <em>query</em> stays
+          pure-image (a user only uploads a photo); only catalog vectors are fused.</li>
+      <li>Stack all 10,000 fused vectors and save <code>index_clip.npz</code>: the SKUs, the
+          <code>(10000, 512)</code> matrix, and a <code>fingerprint</code> that includes the fusion
+          weight (<code>clip:ViT-B-32:laion2b_s34b_b79k:fusion=0.3</code>) — so a config change is detected
+          and a mismatched cache is refused, not silently ranked against.</li>
     </ol>
     <p class="arch-lead">That <code>.npz</code> <strong>is the precomputed search index</strong>. Embedding
        10k images on CPU takes ~12 minutes — which is exactly why it's done once and cached.
@@ -124,8 +129,9 @@
     </ol>
     <p class="arch-lead"><b>Why the query and catalog must share the model:</b> vectors are only comparable if they
        come from the <em>same</em> embedding — that's why the fingerprint pin (Phase 2) matters. <b>Match %</b> on
-       each card is just <code>cosine × 100</code>. In-catalog items score 85–100%; out-of-catalog photos score
-       35–45%, which the threshold turns into a “no strong matches” state.</p>
+       each card is just <code>cosine × 100</code>. Catalog vectors fuse each product's image with its
+       name/brand/description text (see below) — genuine matches cluster ~60–65%, out-of-catalog photos
+       ~40–46%, which the configurable threshold turns into a “no strong matches” state.</p>
   </section>
 
   <!-- ============ RECAP ============ -->

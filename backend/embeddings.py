@@ -165,6 +165,47 @@ def _embed_clip(image_bytes: bytes) -> np.ndarray:
     return feats.cpu().numpy().astype(np.float32)[0]
 
 
+def embed_text_clip(text: str) -> np.ndarray:
+    """CLIP text-tower embedding (same joint space as embed_image), L2-normalized.
+    Catalog-side only — see embed_catalog_item(). Requires the clip backend."""
+    import open_clip
+    s = _get_clip()
+    torch = s["torch"]
+    tokenizer = open_clip.get_tokenizer(config.CLIP_MODEL)
+    tokens = tokenizer([text]).to(s["device"])
+    with torch.no_grad():
+        feats = s["model"].encode_text(tokens)
+        feats = feats / feats.norm(dim=-1, keepdim=True)
+    return feats.cpu().numpy().astype(np.float32)[0]
+
+
+def _l2norm(v: np.ndarray) -> np.ndarray:
+    n = np.linalg.norm(v)
+    return v / n if n > 0 else v
+
+
+def embed_catalog_item(image_bytes: bytes, name: str = "", brand: str = "", description: str = "") -> np.ndarray:
+    """Embed a CATALOG product: image, optionally fused with its text (name/brand/
+    description) per config.TEXT_FUSION_*. Validated (recall eval) to beat
+    image-only retrieval — see backend/experimental/eval_text_fusion.py.
+
+    The QUERY side never calls this — a user only supplies a photo, so
+    visual_search() always uses plain embed_image(). Fusion only enriches what's
+    stored for each catalog item, matching Amazon's published approach (fuse on
+    the catalog side; compare a pure-image query against it).
+
+    Only supported on the clip backend today; other backends fall back to
+    image-only (no error — fusion is an enhancement, not a requirement).
+    """
+    image_vec = embed_image(image_bytes)
+    text = f"{name}. {brand}. {description}".strip(". ")
+    if BACKEND == "clip" and config.TEXT_FUSION_ENABLED and text.strip(". "):
+        text_vec = embed_text_clip(text[:300])
+        w = config.TEXT_FUSION_IMAGE_WEIGHT
+        return _l2norm(w * _l2norm(image_vec) + (1 - w) * _l2norm(text_vec))
+    return image_vec
+
+
 # --------------------------------------------------------------------------
 # Backend 3: Vertex AI Multimodal Embeddings (production target)
 # --------------------------------------------------------------------------
