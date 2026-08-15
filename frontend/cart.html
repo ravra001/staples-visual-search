@@ -1,0 +1,27 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Your Cart | Staples</title>
+<link rel="stylesheet" href="/assets/style.css" />
+</head>
+<body>
+
+<div id="site-header"></div>
+
+<main class="listing-page">
+  <div id="cart-root"></div>
+</main>
+
+<div id="site-footer"></div>
+
+<script src="/assets/app.js"></script>
+<script>
+  renderSiteChrome();
+  renderCartPage('cart-root');
+  wireVisualSearch('camera-btn', 'visual-search-input');
+  wireTextSearch();
+</script>
+</body>
+</html>

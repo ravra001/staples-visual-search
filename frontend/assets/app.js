@@ -14,17 +14,38 @@ function esc(s) {
 }
 
 // ---------- Persistent cart (localStorage) ----------
-const CART_KEY = "vsCartCount";
+// Stores actual line items ({sku: qty}), not just a running count, so a
+// dedicated cart page can list/edit/remove what's actually in it.
+const CART_KEY = "vsCart";
 
+function getCart() {
+  try {
+    const raw = JSON.parse(localStorage.getItem(CART_KEY) || "{}");
+    return (raw && typeof raw === "object" && !Array.isArray(raw)) ? raw : {};
+  } catch (e) {
+    return {};
+  }
+}
+function setCart(cart) {
+  localStorage.setItem(CART_KEY, JSON.stringify(cart));
+  const count = Object.values(cart).reduce((a, b) => a + b, 0);
+  document.querySelectorAll("#cart-count").forEach(el => { el.textContent = count; });
+}
 function getCartCount() {
-  return parseInt(localStorage.getItem(CART_KEY) || "0", 10) || 0;
+  return Object.values(getCart()).reduce((a, b) => a + b, 0);
 }
-function setCartCount(n) {
-  localStorage.setItem(CART_KEY, String(n));
-  document.querySelectorAll("#cart-count").forEach(el => { el.textContent = n; });
+function addToCart(sku, qty = 1) {
+  const cart = getCart();
+  cart[sku] = (cart[sku] || 0) + qty;
+  setCart(cart);
 }
-function addToCart(qty) {
-  setCartCount(getCartCount() + qty);
+function setCartItemQty(sku, qty) {
+  const cart = getCart();
+  if (qty <= 0) delete cart[sku]; else cart[sku] = qty;
+  setCart(cart);
+}
+function removeFromCart(sku) {
+  setCartItemQty(sku, 0);
 }
 
 // ---------- Shared site chrome (header + footer) ----------
@@ -143,10 +164,10 @@ function renderSiteHeader() {
         <div class="account-icons">
           <a class="acct-link" href="#" title="Sign In">${ICONS.user}<span>Sign In</span></a>
           <a class="acct-link" href="#" title="Orders">${ICONS.orders}<span>Orders</span></a>
-          <button class="acct-link cart-btn" title="Cart" aria-label="Cart">
+          <a class="acct-link cart-btn" href="/cart.html" title="Cart" aria-label="Cart">
             ${ICONS.cart}<span>Cart</span>
             <span id="cart-count" class="cart-badge">${getCartCount()}</span>
-          </button>
+          </a>
         </div>
       </div>
 
@@ -372,7 +393,7 @@ function wireProductCardInteractions(container) {
       if (qty > 1) { qty--; qtyVal.textContent = qty; }
     });
     card.querySelector(".add-btn").addEventListener("click", (e) => {
-      addToCart(qty);
+      addToCart(card.dataset.sku, qty);
       e.target.textContent = "Added ✓";
       e.target.classList.add("added");
       setTimeout(() => { e.target.textContent = "Add"; e.target.classList.remove("added"); }, 1200);
@@ -608,7 +629,7 @@ async function runShopTheRoom(file) {
         <button id="room-add-all" class="hero-cta room-add-all">Add all to cart</button>
       </div>`;
     document.getElementById("room-add-all")?.addEventListener("click", (e) => {
-      addToCart(data.count);
+      data.items.forEach(p => addToCart(p.sku, 1));
       e.target.textContent = "Added ✓";
       setTimeout(() => { e.target.textContent = "Add all to cart"; }, 1500);
     });
@@ -1185,7 +1206,7 @@ async function renderProductDetail(elId) {
     el.querySelector(".qty-dec").addEventListener("click", () => { if (qty > 1) { qty--; qtyVal.textContent = qty; } });
     const addBtn = el.querySelector(".pdp-add");
     addBtn.addEventListener("click", () => {
-      addToCart(qty);
+      addToCart(p.sku, qty);
       addBtn.textContent = "Added ✓";
       addBtn.classList.add("added");
       setTimeout(() => { addBtn.textContent = "Add to Cart"; addBtn.classList.remove("added"); }, 1200);
@@ -1199,4 +1220,105 @@ async function renderProductDetail(elId) {
   } catch (e) {
     el.innerHTML = `<div class="state-msg">${e.message}. <a href="/">Back to home</a></div>`;
   }
+}
+
+// ---------- Cart page ----------
+// The cart itself (getCart/setCart/addToCart/...) only ever stores {sku:
+// qty} — no product details — so a dedicated page fetching those details is
+// what actually makes it reviewable/editable instead of just a number badge.
+
+function cartLineItemHTML(p) {
+  const href = `/product.html?sku=${encodeURIComponent(p.sku)}`;
+  return `
+    <div class="cart-line" data-sku="${p.sku}">
+      <a href="${href}" class="cart-line-media"><img src="${esc(p.image_url)}" alt="${esc(p.name)}" /></a>
+      <div class="cart-line-info">
+        <a href="${href}" class="cart-line-name">${esc(p.name)}</a>
+        <div class="cart-line-price">$${p.price.toFixed(2)} each</div>
+        <div class="cart-line-actions">
+          <div class="qty-stepper">
+            <button class="qty-dec" aria-label="Decrease quantity">−</button>
+            <span class="qty-val">${p.qty}</span>
+            <button class="qty-inc" aria-label="Increase quantity">+</button>
+          </div>
+          <button class="cart-remove-btn">Remove</button>
+        </div>
+      </div>
+      <div class="cart-line-total">$${(p.price * p.qty).toFixed(2)}</div>
+    </div>`;
+}
+
+async function renderCartPage(elId) {
+  const el = document.getElementById(elId);
+  if (!el) return;
+  el.innerHTML = `<div class="state-msg"><div class="spinner"></div>Loading your cart…</div>`;
+
+  // One fetch per distinct sku (carts are small — this is not the N+1
+  // listing-endpoint mistake fixed elsewhere in this app, just a handful of
+  // parallel requests for a handful of line items) then everything after is
+  // redrawn from the in-memory `items` array — no re-fetching on every qty
+  // tweak.
+  const cart = getCart();
+  const skus = Object.keys(cart);
+  const fetched = await Promise.all(skus.map(sku =>
+    fetch(`${API_BASE}/api/products/${encodeURIComponent(sku)}`).then(r => r.ok ? r.json() : null).catch(() => null)
+  ));
+  const valid = fetched.filter(Boolean);
+  const validSkus = new Set(valid.map(p => p.sku));
+  const stale = skus.filter(s => !validSkus.has(s));   // catalog changed under an old cart — prune quietly
+  if (stale.length) {
+    const c = getCart();
+    stale.forEach(s => delete c[s]);
+    setCart(c);
+  }
+  let items = valid.map(p => ({ ...p, qty: cart[p.sku] }));
+
+  function draw() {
+    if (!items.length) {
+      el.innerHTML = `
+        <div class="cart-empty">
+          <h1>Your cart is empty</h1>
+          <p>Find something you like with a photo, or browse the catalog.</p>
+          <a href="/" class="hero-cta">Continue shopping</a>
+        </div>`;
+      return;
+    }
+    const totalQty = items.reduce((a, p) => a + p.qty, 0);
+    const subtotal = items.reduce((a, p) => a + p.price * p.qty, 0);
+    const shipping = subtotal >= 45 ? 0 : 5.99;
+    el.innerHTML = `
+      <div class="cart-layout">
+        <div class="cart-items">
+          <h1>Your cart <span class="cart-items-count">(${totalQty} item${totalQty === 1 ? "" : "s"})</span></h1>
+          ${items.map(cartLineItemHTML).join("")}
+        </div>
+        <aside class="cart-summary">
+          <h2>Order summary</h2>
+          <div class="cart-summary-row"><span>Subtotal</span><span>$${subtotal.toFixed(2)}</span></div>
+          <div class="cart-summary-row"><span>Shipping</span><span>${shipping === 0 ? "FREE" : `$${shipping.toFixed(2)}`}</span></div>
+          <div class="cart-summary-row cart-summary-total"><span>Total</span><span>$${(subtotal + shipping).toFixed(2)}</span></div>
+          <button class="hero-cta cart-checkout-btn">Checkout</button>
+          <p class="cart-summary-note">Demo only — checkout isn't wired up to anything.</p>
+        </aside>
+      </div>`;
+
+    el.querySelectorAll(".cart-line").forEach(line => {
+      const sku = line.dataset.sku;
+      const item = items.find(p => p.sku === sku);
+      const update = (newQty) => {
+        setCartItemQty(sku, newQty);
+        if (newQty <= 0) items = items.filter(p => p.sku !== sku);
+        else item.qty = newQty;
+        draw();
+      };
+      line.querySelector(".qty-inc").addEventListener("click", () => update(item.qty + 1));
+      line.querySelector(".qty-dec").addEventListener("click", () => update(item.qty - 1));
+      line.querySelector(".cart-remove-btn").addEventListener("click", () => update(0));
+    });
+    el.querySelector(".cart-checkout-btn")?.addEventListener("click", () => {
+      alert(`This is a demo, so checkout isn't wired up — but your total ($${(subtotal + shipping).toFixed(2)}) was calculated correctly.`);
+    });
+  }
+
+  draw();
 }
