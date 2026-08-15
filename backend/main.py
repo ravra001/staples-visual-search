@@ -324,8 +324,15 @@ def _page(items, limit, offset):
 
 @app.get("/api/products")
 def list_products(category: str | None = None, limit: int | None = config.PAGE_SIZE, offset: int = 0):
-    items = get_products_by_category(category) if category else get_all_products()
-    total, window = _page(items, limit, offset)
+    if DATA_BACKEND == "sql":
+        # Paginated in SQL (LIMIT/OFFSET) — never fetches the whole table just
+        # to slice one page of it (see get_products_page's docstring).
+        offset = max(int(offset), 0)
+        limit = max(1, min(int(limit), _MAX_PAGE_SIZE)) if limit is not None else _MAX_PAGE_SIZE
+        total, window = sql_repo.get_products_page(category, limit, offset)
+    else:
+        items = get_products_by_category(category) if category else get_all_products()
+        total, window = _page(items, limit, offset)
     return {"count": total, "offset": offset, "limit": limit,
             "items": [_serialize(p) for p in window]}
 
@@ -340,7 +347,7 @@ def get_product(sku: str):
 
 @app.get("/api/categories")
 def list_categories():
-    cats = sorted({p["category"] for p in get_all_products()})
+    cats = sql_repo.get_categories() if DATA_BACKEND == "sql" else sorted({p["category"] for p in get_all_products()})
     return {"categories": cats}
 
 
