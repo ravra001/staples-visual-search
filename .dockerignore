@@ -1,0 +1,35 @@
+# NOTE: this is intentionally NOT the same list as .gitignore. In particular,
+# backend/models/hf/ (the bundled CLIP model) IS git-ignored (too big for
+# GitHub) but must NOT be excluded here — Docker builds from the local
+# filesystem, not from git, so the model has to ship in the image.
+
+.git/
+.venv/
+venv/
+__pycache__/
+*.pyc
+*.egg-info/
+
+# Packaged bundles / local-only artifacts
+*.zip
+backend/.env.local
+backend/.env.local.txt
+.env*
+
+# Experimental multi-angle / compare-methods data — not part of production,
+# regenerable, no need to bloat the deploy image.
+backend/experimental/
+backend/static/images/multiview/
+backend/data/catalog_multiview*.json
+backend/data/index_multiview*.npz
+backend/data/index_compare.npz
+
+# The heuristic-backend index isn't needed when shipping EMBEDDING_BACKEND=clip.
+backend/data/index_heuristic.npz
+
+docker-compose.yml
+Dockerfile
+.dockerignore
+README.md
+HOW_IT_WORKS.md
+RUN_10K.md
