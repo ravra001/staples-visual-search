@@ -31,6 +31,13 @@ from products_data import (
 )
 from embeddings import BACKEND as EMBEDDING_BACKEND, embed_image, embed_catalog_item
 
+# When DATA_BACKEND=sql, vector search happens IN POSTGRES (pgvector) instead
+# of the in-memory NumPy matrix below — see _do_visual_search and
+# _load_sql_centroids. Only imported for that backend, so the default
+# (memory) path never needs SQLAlchemy/psycopg/pgvector installed.
+if DATA_BACKEND == "sql":
+    import products_repo_sql as sql_repo
+
 BASE_DIR = os.path.dirname(__file__)
 IMAGES_DIR = os.path.join(BASE_DIR, "static", "images", "products")
 CACHE_DIR = os.path.join(BASE_DIR, "data")
@@ -181,6 +188,23 @@ def _build_category_centroids():
     print(f"[startup] built {len(cats)} category centroids for the soft classifier")
 
 
+def _load_sql_centroids():
+    """DATA_BACKEND=sql equivalent of _build_category_centroids — loads the
+    precomputed centroids from Postgres (13-row SELECT) instead of averaging
+    the in-memory matrix, since that matrix doesn't exist under this backend.
+    Populates the SAME globals, so _classify() is unchanged either way."""
+    global _centroid_cats, _centroid_matrix
+    centroids = sql_repo.get_category_centroids()
+    if not centroids:
+        print("[startup] WARNING: no category centroids in Postgres — run "
+              "products_repo_sql.init_and_seed() first. Classifier disabled until then.")
+        return
+    cats = sorted(centroids)
+    _centroid_cats = np.array(cats, dtype=object)
+    _centroid_matrix = _normalize_rows(np.array([centroids[c] for c in cats], dtype=np.float32))
+    print(f"[startup] loaded {len(cats)} category centroids from Postgres for the soft classifier")
+
+
 def _classify(qn_vec):
     """qn_vec must be L2-normalized. Returns {category, confidence(%), ranking}."""
     if _centroid_matrix.size == 0:
@@ -236,8 +260,17 @@ def _display_scores(qn_vec, skus):
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    _build_catalog_index()
-    _build_category_centroids()
+    if DATA_BACKEND == "sql":
+        # Vectors live in Postgres — no in-memory index to build. Only the
+        # small classifier centroids are loaded into memory (see
+        # _load_sql_centroids); _do_visual_search routes to
+        # sql_repo.search_by_vector() instead of _rank/_display_scores.
+        _load_sql_centroids()
+        print(f"[startup] backends: embedding={EMBEDDING_BACKEND}, data={DATA_BACKEND} — "
+              f"vector search delegated to Postgres/pgvector (no in-memory index)")
+    else:
+        _build_catalog_index()
+        _build_category_centroids()
     yield
 
 
@@ -339,20 +372,32 @@ def _do_visual_search(image_bytes, top_k, scope):
     if cls and (scope == "force" or (scope == "auto" and cls["confidence"] >= CONF_THRESHOLD)):
         category, scoped = cls["category"], True
 
-    matches = _rank(qn, top_k, category=category)
-    if scoped and not matches:                # empty scoped result → fall back to full search
-        category, scoped = None, False
-        matches = _rank(qn, top_k)
+    if DATA_BACKEND == "sql":
+        # Vector search happens IN POSTGRES: one pgvector query ranks by the
+        # fused `embedding` column (HNSW-indexed) AND returns the pure-image
+        # `image_embedding` cosine for those SAME rows in one round trip — no
+        # separate rank/display pass needed (see sql_repo.search_by_vector).
+        ranked = sql_repo.search_by_vector(qn.tolist(), category=category, k=top_k)
+        if scoped and not ranked:              # empty scoped result → fall back to full search
+            category, scoped = None, False
+            ranked = sql_repo.search_by_vector(qn.tolist(), category=None, k=top_k)
+        matches = [(sku, display_score) for sku, _rank_score, display_score in ranked]
+        searched = sql_repo.count_by_category(category)
+    else:
+        matches = _rank(qn, top_k, category=category)
+        if scoped and not matches:             # empty scoped result → fall back to full search
+            category, scoped = None, False
+            matches = _rank(qn, top_k)
 
-    # RANKING (order + which items) always comes from the fused score above —
-    # that's what the recall eval validated. What's DISPLAYED (and what the
-    # match-threshold gate below reacts to) is the pure-image score instead:
-    # more interpretable, since a pure-image query naturally scores lower
-    # against a fused catalog vector than against a pure-image one.
-    disp = _display_scores(qn, [s for s, _ in matches])
-    matches = [(s, disp.get(s, fused_score)) for s, fused_score in matches]
+        # RANKING (order + which items) always comes from the fused score above —
+        # that's what the recall eval validated. What's DISPLAYED (and what the
+        # match-threshold gate below reacts to) is the pure-image score instead:
+        # more interpretable, since a pure-image query naturally scores lower
+        # against a fused catalog vector than against a pure-image one.
+        disp = _display_scores(qn, [s for s, _ in matches])
+        matches = [(s, disp.get(s, fused_score)) for s, fused_score in matches]
+        searched = int((_index_cats == category).sum()) if category is not None else int(_index_skus.shape[0])
 
-    searched = int((_index_cats == category).sum()) if category is not None else int(_index_skus.shape[0])
     return {"cls": cls, "scoped": scoped, "matches": matches, "searched": searched}
 
 
@@ -408,10 +453,11 @@ async def visual_search(request: Request, file: UploadFile = File(...),
         # "image" = displayed % is pure-image cosine (match_threshold's calibrated
         # scale); "fused" = no valid image_vecs this boot, displayed % is the raw
         # fused score instead (reads much lower for the same true match quality —
-        # match_threshold is NOT calibrated for this scale). Deterministic per
-        # boot, not per-request, since it reflects whether the loaded index has
-        # aligned image_vecs at all.
-        "score_basis": "image" if _index_image_matrix.size else "fused",
+        # match_threshold is NOT calibrated for this scale). Under DATA_BACKEND=sql
+        # the display score always comes from pgvector's image_embedding column
+        # (search_by_vector always returns it), so it's "image" whenever that
+        # backend is active; under memory it depends on whether image_vecs loaded.
+        "score_basis": "image" if (DATA_BACKEND == "sql" or _index_image_matrix.size) else "fused",
     }
 
 

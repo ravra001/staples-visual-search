@@ -27,10 +27,11 @@ gcp = [
     "google-cloud-aiplatform>=1.60",
     "truststore>=0.9",
 ]
-# Cloud SQL / SQLite catalog:   uv sync --extra sql
+# Cloud SQL / Postgres + pgvector catalog:  uv sync --extra sql
 sql = [
     "sqlalchemy>=2.0",
     "psycopg[binary]>=3.1",
+    "pgvector>=0.3",
 ]
 
 # This is an application, not a library — don't build/install the project itself.

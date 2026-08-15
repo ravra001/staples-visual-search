@@ -14,8 +14,9 @@ truststore>=0.9
 # --- EMBEDDING_BACKEND=vertex (Google Vertex AI Multimodal Embeddings) ---
 google-cloud-aiplatform>=1.60
 
-# --- DATA_BACKEND=sql (Cloud SQL / Postgres) ---
+# --- DATA_BACKEND=sql (Cloud SQL / Postgres, pgvector for vector search) ---
 SQLAlchemy>=2.0
 psycopg[binary]>=3.1
+pgvector>=0.3
 # For Cloud SQL in production you may also want:
 # cloud-sql-python-connector[psycopg]>=1.7
