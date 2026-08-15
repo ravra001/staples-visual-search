@@ -380,6 +380,26 @@ async def visual_search(request: Request, file: UploadFile = File(...),
     }
 
 
+# ---------- experimental: 3-way method comparison (baseline vs multiview vs fusion) ----------
+# Entirely optional — only registered if the experimental data exists (it's
+# gitignored/regenerable, see backend/experimental/). Never touches production
+# ranking; a missing dependency here can't affect the main app.
+try:
+    from experimental import compare_search
+    if compare_search.READY:
+        @app.post("/api/experimental/compare-search")
+        async def experimental_compare_search(file: UploadFile = File(...), top_k: int = 8):
+            if not file.content_type or not file.content_type.startswith("image/"):
+                raise HTTPException(400, "Please upload an image file")
+            image_bytes = await file.read(_MAX_UPLOAD_BYTES + 1)
+            if not image_bytes or len(image_bytes) > _MAX_UPLOAD_BYTES:
+                raise HTTPException(400, "Invalid or oversized image")
+            return await run_in_threadpool(compare_search.compare, image_bytes, top_k)
+        print("[startup] experimental compare-search endpoint registered (/api/experimental/compare-search)")
+except Exception as e:
+    print(f"[startup] experimental compare-search not available ({e}) — skipping, production unaffected")
+
+
 # ---------- static assets ----------
 
 app.mount("/images", StaticFiles(directory=os.path.join(BASE_DIR, "static", "images")), name="images")

@@ -100,6 +100,10 @@ function renderSiteHeader() {
               <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M4 5.5A1.5 1.5 0 0 1 5.5 4H11v16H5.5A1.5 1.5 0 0 1 4 18.5z"/><path d="M20 5.5A1.5 1.5 0 0 0 18.5 4H13v16h5.5a1.5 1.5 0 0 0 1.5-1.5z"/></svg>
               <span><strong>How It Works</strong><small>The search pipeline, step by step</small></span>
             </a>
+            <a class="menu-item" href="/compare-methods.html" style="display:flex;align-items:center;gap:8px;">
+              <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.7" style="flex-shrink:0;"><path d="M3 3v18h18"/><path d="M18 17V9"/><path d="M13 17V5"/><path d="M8 17v-3"/></svg>
+              Compare methods <em style="font-style:normal;color:var(--gray-text);font-size:11px;">(experimental)</em>
+            </a>
             <div class="menu-divider"></div>
             <p class="menu-label">Shop by category</p>
             <div id="menu-categories"></div>

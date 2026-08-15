@@ -709,6 +709,34 @@ a { color: inherit; text-decoration: none; }
   .tier.three { grid-template-columns: 1fr; }
 }
 
+/* ---------- Compare-methods (experimental) page ---------- */
+
+.cmp-upload { display: flex; flex-direction: column; align-items: flex-start; gap: 14px; }
+.cmp-upload .vs-query-card { align-items: flex-start; }
+.cmp-upload .vs-query-frame { width: 110px; height: 110px; }
+
+.cmp-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 20px; }
+.cmp-col { border: 1px solid var(--border); border-radius: 12px; overflow: hidden; background: #fff; }
+.cmp-col-head { padding: 14px 16px; border-bottom: 1px solid var(--border); background: #fafafa; }
+.cmp-col-head h3 { margin: 0 0 4px; font-size: 15px; }
+.cmp-col-head .arch-tag { color: var(--gray-text); font-size: 11.5px; }
+.cmp-col-negative .cmp-col-head { background: #fdf3f3; }
+.cmp-col-negative .cmp-col-head h3 { color: var(--staples-red); }
+.cmp-col-positive .cmp-col-head { background: #f0faf3; }
+.cmp-col-positive .cmp-col-head h3 { color: #0a7a2f; }
+
+.cmp-cards { display: flex; flex-direction: column; gap: 10px; padding: 12px; max-height: 640px; overflow-y: auto; }
+.cmp-card { display: flex; align-items: center; gap: 10px; border: 1px solid var(--border); border-radius: 8px; padding: 8px; }
+.cmp-thumb-wrap { position: relative; width: 56px; height: 56px; flex-shrink: 0; background: #fafafa; border-radius: 6px; overflow: hidden; }
+.cmp-thumb-wrap img { width: 100%; height: 100%; object-fit: contain; }
+.cmp-thumb-missing { width: 100%; height: 100%; display: flex; align-items: center; justify-content: center; font-size: 9px; color: var(--gray-text); text-align: center; }
+.cmp-thumb-wrap .match-badge { position: absolute; bottom: 2px; left: 2px; right: 2px; font-size: 9px; padding: 1px 4px; text-align: center; border-radius: 4px; }
+.cmp-name { font-size: 12px; line-height: 1.35; margin: 0; color: var(--ink); }
+
+@media (max-width: 900px) {
+  .cmp-grid { grid-template-columns: 1fr; }
+}
+
 /* ---------- Footer ---------- */
 
 .site-footer {
