@@ -648,6 +648,17 @@ body.vs-dragging::after {
 .vs-query-hint { color: var(--gray-text); font-size: 13px; margin: 0; }
 .vs-stats { color: var(--gray-text); font-size: 12px; margin: 4px 0 0; font-variant-numeric: tabular-nums; }
 
+.vs-sort-row { display: flex; justify-content: flex-end; margin: 0 0 14px; min-height: 1px; }
+.vs-sort-label { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--gray-text); }
+.vs-sort-label select {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 5px 8px;
+  font-size: 12px;
+  color: var(--ink);
+  background: #fff;
+}
+
 .vs-refine-form { display: flex; gap: 8px; margin-top: 12px; max-width: 480px; }
 .vs-refine-form input[type="text"] {
   flex: 1;

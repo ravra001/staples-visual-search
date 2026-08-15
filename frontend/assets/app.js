@@ -561,11 +561,67 @@ function startVisualSearch(file) {
 let _lastQueryFile = null;
 let _lastRefineText = "";
 
+// The last successful result set (from an upload, a text refine, or a
+// "find similar" call) plus the sort currently applied to it. Kept separate
+// from the CLIP-side refinement on purpose: price isn't a visual concept
+// CLIP was ever trained to ground (verified empirically — "cheaper" and "but
+// in black" landed on nearly the same items when both were sent through the
+// embedding), so a price intent is handled as a plain client-side sort over
+// the already-computed matches, never as a new embedding call. This is also
+// what makes chaining work correctly: "in black" changes WHICH items are the
+// best matches (re-ranks via CLIP); "cheaper" only changes the ORDER you see
+// them in (sorts), without discarding the visual refinement already applied.
+let _lastResultData = null;
+let _currentSort = "match";   // "match" | "price-asc" | "price-desc"
+
+function _detectPriceIntent(text) {
+  const t = text.toLowerCase();
+  if (/\b(cheap(er|est)?|budget|affordable|inexpensive|lower[- ]?price|less expensive|under \$?\d+)\b/.test(t)) return "price-asc";
+  if (/\b(expensive|pricier|pricey|premium|higher[- ]?end|luxury|splurge|top[- ]?shelf)\b/.test(t)) return "price-desc";
+  return null;
+}
+
+function _sortedItems() {
+  const items = (_lastResultData && _lastResultData.items) || [];
+  if (_currentSort === "price-asc") return [...items].sort((a, b) => a.price - b.price);
+  if (_currentSort === "price-desc") return [...items].sort((a, b) => b.price - a.price);
+  return items;   // "match" — server already returns items in match-score order
+}
+
+// Re-renders the current result set under whatever sort is active, with NO
+// network call — used both right after a real search and whenever the sort
+// control changes.
+function applySortAndRender() {
+  const grid = document.getElementById("listing-grid");
+  const statusEl = document.getElementById("vs-status");
+  if (!grid || !statusEl || !_lastResultData) return;
+  renderVisualResults(grid, statusEl, { ..._lastResultData, items: _sortedItems() });
+  renderSortControl();
+}
+
+function renderSortControl() {
+  const mount = document.getElementById("vs-sort");
+  if (!mount || !_lastResultData || !(_lastResultData.items || []).length) { if (mount) mount.innerHTML = ""; return; }
+  mount.innerHTML = `
+    <label class="vs-sort-label">Sort
+      <select id="vs-sort-select">
+        <option value="match"${_currentSort === "match" ? " selected" : ""}>Best match</option>
+        <option value="price-asc"${_currentSort === "price-asc" ? " selected" : ""}>Price: Low to High</option>
+        <option value="price-desc"${_currentSort === "price-desc" ? " selected" : ""}>Price: High to Low</option>
+      </select>
+    </label>`;
+  mount.querySelector("#vs-sort-select").addEventListener("change", (e) => {
+    _currentSort = e.target.value;
+    applySortAndRender();
+  });
+}
+
 async function runVisualSearch(file, opts = {}) {
   _lastQueryFile = file;
   const scope = opts.scope || "auto";
   const refineText = opts.refineText !== undefined ? opts.refineText : _lastRefineText;
   _lastRefineText = refineText;
+  _currentSort = "match";   // a real (re-)search always starts from best-match order
   const statusEl = document.getElementById("vs-status");
   const grid = document.getElementById("listing-grid");
 
@@ -590,8 +646,9 @@ async function runVisualSearch(file, opts = {}) {
       throw new Error(err.detail || "Search failed");
     }
     const data = await res.json();
+    _lastResultData = data;
     renderCategoryChip(data);
-    renderVisualResults(grid, statusEl, data);
+    applySortAndRender();
     renderRefineBox(data);
   } catch (e) {
     _clearVsExtra();
@@ -600,8 +657,11 @@ async function runVisualSearch(file, opts = {}) {
   }
 }
 
-// "but in black" / "cheaper" text box — blends a CLIP text embedding into the
-// query on the next search (see backend's refine_text param). Rendered fresh
+// "but in black" / "cheaper" text box. Visual refinements ("in black") blend
+// a CLIP text embedding into the query and re-rank (see backend's
+// refine_text param). Price refinements ("cheaper") are detected by keyword
+// and just re-sort the CURRENT results — see _detectPriceIntent above for
+// why these two are handled by entirely different mechanisms. Rendered fresh
 // after every search so it reflects the current photo/refinement state.
 function renderRefineBox(data) {
   const mount = document.getElementById("vs-refine");
@@ -615,6 +675,14 @@ function renderRefineBox(data) {
   mount.querySelector("#vs-refine-form").addEventListener("submit", (e) => {
     e.preventDefault();
     const text = mount.querySelector("#vs-refine-input").value.trim();
+    const priceIntent = text ? _detectPriceIntent(text) : null;
+    if (priceIntent) {
+      // Sort-only: leaves _lastRefineText (and thus the underlying match set)
+      // untouched, so a prior visual refinement like "in black" survives.
+      _currentSort = priceIntent;
+      applySortAndRender();
+      return;
+    }
     if (_lastQueryFile) runVisualSearch(_lastQueryFile, { refineText: text });
   });
   mount.querySelector("#vs-refine-clear")?.addEventListener("click", () => {
@@ -752,10 +820,14 @@ async function runSimilarSearch(sku) {
 
     if (statsEl) statsEl.textContent = data.count ? `Found ${data.count} similar products in ${tookMs}ms` : "";
     if (data.count) {
-      statusEl.textContent = `Found ${data.count} similar product${data.count === 1 ? "" : "s"}`;
-      grid.innerHTML = data.items.map(p => productCardHTML(p)).join("");
-      wireProductCardInteractions(grid);
+      // renderVisualResults (via applySortAndRender) sets statusEl itself —
+      // no match_threshold on this endpoint's response, so every item counts
+      // as a "strong match" there, which reads fine for a find-similar context.
+      _lastResultData = data;
+      _currentSort = "match";
+      applySortAndRender();
     } else {
+      _lastResultData = null;
       statusEl.textContent = "No similar products found";
       grid.innerHTML = `<div class="state-msg">Couldn't find anything visually similar to this product.</div>`;
     }
