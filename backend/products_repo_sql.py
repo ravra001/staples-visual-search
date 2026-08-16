@@ -369,7 +369,11 @@ def init_and_seed(reuse_vectors_from=None, embed_missing=False):
     Base.metadata.create_all(engine)
 
     reusable = _load_reusable_vectors(reuse_vectors_from)
-    model_version = config.index_fingerprint(catalog_hash=catalog_content_hash())
+    # Explicit PRODUCTS, not catalog_content_hash()'s default — its default
+    # calls get_all_products(), which under DATA_BACKEND=sql (required to
+    # reach this function at all) queries the live table being seeded INTO,
+    # not the catalog file being seeded FROM.
+    model_version = config.index_fingerprint(catalog_hash=catalog_content_hash(PRODUCTS))
 
     if embed_missing:
         from embeddings import embed_catalog_item

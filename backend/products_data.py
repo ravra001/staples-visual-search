@@ -182,13 +182,21 @@ else:
     search_products = _mem_search
 
 
-def catalog_content_hash():
+def catalog_content_hash(products=None):
     """Short hash of every product's sku+name+brand+description, so an index
     cache can detect when catalog TEXT changed (not just the model) — a fused
     vector is 70% a function of this text, so an edit here silently invalidates
-    the cached vector even though embedding.backend/model didn't change."""
+    the cached vector even though embedding.backend/model didn't change.
+
+    products: explicit list to hash. Defaults to get_all_products() — correct
+    for the in-memory backend (that call IS the catalog). Under
+    DATA_BACKEND=sql, get_all_products() queries the live Postgres table
+    instead, which during seeding is exactly the wrong thing to hash (either
+    empty on a first seed, or the OLD content on a re-seed) — so
+    init_and_seed() always passes PRODUCTS (the just-loaded catalog file)
+    explicitly here rather than relying on the default."""
     import hashlib
     h = hashlib.sha1()
-    for p in sorted(get_all_products(), key=lambda p: p["sku"]):
+    for p in sorted(products if products is not None else get_all_products(), key=lambda p: p["sku"]):
         h.update(f"{p['sku']}|{p.get('name', '')}|{p.get('brand', '')}|{p.get('description', '')[:300]}".encode("utf-8"))
     return h.hexdigest()[:12]
