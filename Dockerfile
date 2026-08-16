@@ -35,6 +35,10 @@ RUN pip install --no-cache-dir -r requirements.txt \
 # backend/models/hf, which IS gitignored but must still ship in the image).
 COPY backend/ ./backend/
 COPY frontend/ ./frontend/
+# Root docs linked from the architecture/how-it-works pages (main.py's
+# root_doc route) — without these the container 500s on a click, not a
+# clean 404, since FileResponse fails at send-time on a missing path.
+COPY README.md GCP_SETUP.md HOW_IT_WORKS.md RUN_10K.md ./
 
 # Cloud Run injects $PORT and expects the container to listen on 0.0.0.0 —
 # config.py already reads PORT from the environment; only HOST needs the

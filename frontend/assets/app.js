@@ -604,7 +604,8 @@ function wireRoomSearch(buttonId, inputId) {
 
 window.__pendingRoomFile = null;
 
-function startShopTheRoom(file) {
+async function startShopTheRoom(file) {
+  file = await _downscaleForHandoff(file);   // same sessionStorage-quota risk as startVisualSearch
   window.__pendingRoomFile = file;
   if (location.pathname.endsWith("shop-the-room.html")) {
     runShopTheRoom(file);
@@ -683,10 +684,44 @@ function renderShopTheRoomPage() {
   }
 }
 
+// Real camera photos (phone or desktop webcam upload) commonly run 3-6MB —
+// close enough to sessionStorage's ~5MB (UTF-16) quota that base64-encoding
+// one for the cross-page handoff below can throw QuotaExceededError, which
+// silently drops the query entirely (see startVisualSearch). CLIP resizes to
+// 224px regardless, so there's no quality reason to carry full resolution
+// through this handoff -- shrink to a safe, still-plenty-sharp size first.
+// Also cuts upload time meaningfully on venue/mobile wifi.
+function _downscaleForHandoff(file, maxDim = 1280, quality = 0.85) {
+  return new Promise((resolve) => {
+    const url = URL.createObjectURL(file);
+    const img = new Image();
+    img.onload = () => {
+      URL.revokeObjectURL(url);
+      const { width, height } = img;
+      if (Math.max(width, height) <= maxDim) {
+        resolve(file);   // already small enough -- no re-encode needed
+        return;
+      }
+      const scale = maxDim / Math.max(width, height);
+      const w = Math.round(width * scale), h = Math.round(height * scale);
+      const canvas = document.createElement("canvas");
+      canvas.width = w;
+      canvas.height = h;
+      canvas.getContext("2d").drawImage(img, 0, 0, w, h);
+      canvas.toBlob((blob) => {
+        resolve(blob ? new File([blob], file.name || "photo.jpg", { type: "image/jpeg" }) : file);
+      }, "image/jpeg", quality);
+    };
+    img.onerror = () => { URL.revokeObjectURL(url); resolve(file); };   // fall back to the original rather than block the search
+    img.src = url;
+  });
+}
+
 // Holds the in-flight query so the destination page can pick it up.
 window.__pendingVisualSearchFile = null;
 
-function startVisualSearch(file) {
+async function startVisualSearch(file) {
+  file = await _downscaleForHandoff(file);
   window.__pendingVisualSearchFile = file;
   if (location.pathname.endsWith("visual-search.html")) {
     runVisualSearch(file);

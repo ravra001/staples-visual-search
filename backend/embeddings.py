@@ -29,6 +29,7 @@ fixed per process at startup).
 """
 import io
 import os
+import threading
 from typing import List, Tuple
 
 import numpy as np
@@ -149,30 +150,41 @@ def _embed_heuristic(image_bytes: bytes) -> np.ndarray:
 # Backend 2: local OpenCLIP (real model, still offline)
 # --------------------------------------------------------------------------
 
-_clip_state = {}  # lazily-populated: model, preprocess, device
+_clip_state = {}  # lazily-populated: model, preprocess, device, tokenizer
+_clip_load_lock = threading.Lock()
 
 
 def _get_clip():
-    """Lazy-load the CLIP model once per process (weights download on first use)."""
+    """Lazy-load the CLIP model once per process (weights download on first use).
+
+    Guarded by a lock + double-check: without it, two concurrent first-requests
+    (plausible under Cloud Run's --concurrency=20, e.g. a demo presenter and a
+    QR-scanning phone hitting cold start at once) would each load their own
+    full copy of the model into a memory-constrained instance.
+    """
     if _clip_state:
         return _clip_state
-    try:
-        import torch
-        import open_clip
-    except ImportError as e:  # pragma: no cover - depends on optional install
-        raise RuntimeError(
-            "EMBEDDING_BACKEND=clip requires torch + open_clip_torch. "
-            "Install them with: pip install -r requirements-ml.txt"
-        ) from e
+    with _clip_load_lock:
+        if _clip_state:  # someone else finished loading while we waited for the lock
+            return _clip_state
+        try:
+            import torch
+            import open_clip
+        except ImportError as e:  # pragma: no cover - depends on optional install
+            raise RuntimeError(
+                "EMBEDDING_BACKEND=clip requires torch + open_clip_torch. "
+                "Install them with: pip install -r requirements-ml.txt"
+            ) from e
 
-    model_name = config.CLIP_MODEL
-    pretrained = config.CLIP_PRETRAINED
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    model, _, preprocess = open_clip.create_model_and_transforms(
-        model_name, pretrained=pretrained, device=device
-    )
-    model.eval()
-    _clip_state.update(model=model, preprocess=preprocess, device=device, torch=torch)
+        model_name = config.CLIP_MODEL
+        pretrained = config.CLIP_PRETRAINED
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+        model, _, preprocess = open_clip.create_model_and_transforms(
+            model_name, pretrained=pretrained, device=device
+        )
+        model.eval()
+        tokenizer = open_clip.get_tokenizer(model_name)
+        _clip_state.update(model=model, preprocess=preprocess, device=device, torch=torch, tokenizer=tokenizer)
     return _clip_state
 
 
@@ -190,11 +202,9 @@ def _embed_clip(image_bytes: bytes) -> np.ndarray:
 def embed_text_clip(text: str) -> np.ndarray:
     """CLIP text-tower embedding (same joint space as embed_image), L2-normalized.
     Catalog-side only — see embed_catalog_item(). Requires the clip backend."""
-    import open_clip
     s = _get_clip()
     torch = s["torch"]
-    tokenizer = open_clip.get_tokenizer(config.CLIP_MODEL)
-    tokens = tokenizer([text]).to(s["device"])
+    tokens = s["tokenizer"]([text]).to(s["device"])
     with torch.no_grad():
         feats = s["model"].encode_text(tokens)
         feats = feats / feats.norm(dim=-1, keepdim=True)

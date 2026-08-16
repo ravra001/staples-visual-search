@@ -258,6 +258,14 @@ def _display_scores(qn_vec, skus):
     return out
 
 
+# Minimal valid 1x1 PNG, used only to force the CLIP model to load at startup
+# (see lifespan below) rather than on whichever user's request happens to
+# arrive first.
+_WARMUP_PNG = (b'\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01\x08\x06\x00\x00\x00'
+               b'\x1f\x15\xc4\x89\x00\x00\x00\nIDATx\x9cc\x00\x01\x00\x00\x05\x00\x01\r\n\x2d\xb4\x00\x00'
+               b'\x00\x00IEND\xaeB`\x82')
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     if DATA_BACKEND == "sql":
@@ -271,6 +279,18 @@ async def lifespan(app: FastAPI):
     else:
         _build_catalog_index()
         _build_category_centroids()
+
+    if EMBEDDING_BACKEND == "clip":
+        # Force the (otherwise lazily-loaded) model to load now: a cold load
+        # is a 5-15s disk read + torch init, and without this it happens
+        # inside whichever request is first to reach the process — visibly,
+        # during a live demo. embeddings._get_clip() is lock-guarded, so this
+        # also closes the window where two near-simultaneous first-requests
+        # would each load their own full copy of the model.
+        t0 = time.time()
+        await run_in_threadpool(embed_image, _WARMUP_PNG)
+        print(f"[startup] warmed CLIP model in {time.time() - t0:.2f}s")
+
     yield
 
 
@@ -298,9 +318,18 @@ async def no_cache_app_code(request, call_next):
 def _serialize(p):
     list_price = p.get("list_price") or p.get("price") or 0
     savings = round(100 * (list_price - p["price"]) / list_price) if list_price > 0 else 0
+    image_url = p.get("image_url") or f"/images/products/{p['sku']}.png"
+    if config.IMAGES_BASE_URL and image_url.startswith("/images/products/"):
+        # Point straight at the CDN instead of this container's own
+        # same-origin path. A bare 302 (see redirect_product_image below)
+        # isn't cacheable by browsers, so leaving this as a relative path
+        # would mean every image on every page view re-hits Cloud Run once
+        # just to be told where the real bytes are -- exactly the
+        # CPU/concurrency contention IMAGES_BASE_URL exists to avoid.
+        image_url = f"{config.IMAGES_BASE_URL}/products/{image_url.rsplit('/', 1)[-1]}"
     return {
         **p,
-        "image_url": p.get("image_url") or f"/images/products/{p['sku']}.png",
+        "image_url": image_url,
         "savings_pct": max(savings, 0),
     }
 
@@ -650,11 +679,15 @@ async def shop_the_room(request: Request, file: UploadFile = File(...)):
     _t0 = time.time()
     try:
         matches = await run_in_threadpool(_do_shop_the_room, image_bytes)
-    except Exception as e:
-        raise HTTPException(400, f"Could not process image: {e}")
+    except OSError:
+        # PIL couldn't decode the upload -- the one failure mode this message
+        # actually describes. Anything else (a DB/ranking error mid-request)
+        # is a real server-side problem, not a bad image, and shouldn't be
+        # mislabeled as one or echo internal exception text to the client.
+        raise HTTPException(400, "Could not process image. Try a different image file.")
     took_ms = round((time.time() - _t0) * 1000)
 
-    by_sku = get_products_by_skus([sku for sku, _ in matches])
+    by_sku = await run_in_threadpool(get_products_by_skus, [sku for sku, _ in matches])
     results, total = [], 0.0
     for sku, score in matches:
         p = by_sku.get(sku)
@@ -704,12 +737,13 @@ async def visual_search(request: Request, file: UploadFile = File(...),
     _t0 = time.time()
     try:
         r = await run_in_threadpool(_do_visual_search, image_bytes, top_k, scope, refine_text)
-    except Exception as e:
-        raise HTTPException(400, f"Could not process image: {e}")
+    except OSError:
+        # See the matching comment in shop_the_room above.
+        raise HTTPException(400, "Could not process image. Try a different image file.")
     took_ms = round((time.time() - _t0) * 1000)
 
     cls, matches = r["cls"], r["matches"]
-    by_sku = get_products_by_skus([sku for sku, _ in matches])   # single batch fetch (no N+1)
+    by_sku = await run_in_threadpool(get_products_by_skus, [sku for sku, _ in matches])   # single batch fetch (no N+1)
     results = []
     for sku, score in matches:
         p = by_sku.get(sku)
@@ -754,7 +788,15 @@ async def visual_search(request: Request, file: UploadFile = File(...),
 if config.IMAGES_BASE_URL:
     @app.get("/images/products/{filename}")
     def redirect_product_image(filename: str):
-        return RedirectResponse(f"{config.IMAGES_BASE_URL}/products/{filename}", status_code=302)
+        # _serialize points API-served image_urls straight at the CDN now, so
+        # this route only still fires for hardcoded same-origin references
+        # (e.g. the homepage's hero/room sample thumbnails). Cache-Control on
+        # the redirect itself lets the browser skip the round trip on repeat
+        # views instead of re-hitting Cloud Run for a bare 302 every time.
+        return RedirectResponse(
+            f"{config.IMAGES_BASE_URL}/products/{filename}", status_code=302,
+            headers={"Cache-Control": "public, max-age=86400"},
+        )
 
 app.mount("/images", StaticFiles(directory=os.path.join(BASE_DIR, "static", "images")), name="images")
 app.mount("/assets", StaticFiles(directory=os.path.join(FRONTEND_DIR, "assets")), name="assets")
@@ -769,9 +811,14 @@ _ROOT_DOCS = {"README.md", "GCP_SETUP.md", "HOW_IT_WORKS.md", "RUN_10K.md"}
 @app.get("/{doc_name}.md")
 def root_doc(doc_name: str):
     fname = f"{doc_name}.md"
-    if fname not in _ROOT_DOCS:
+    path = os.path.join(ROOT_DIR, fname)
+    # FileResponse doesn't check existence up front -- a missing path fails at
+    # ASGI send-time as an unhandled 500, not a clean 404. Check first (also
+    # covers _ROOT_DOCS drifting out of sync with what actually ships in the
+    # image, e.g. Dockerfile's COPY list).
+    if fname not in _ROOT_DOCS or not os.path.isfile(path):
         raise HTTPException(404)
-    return FileResponse(os.path.join(ROOT_DIR, fname), media_type="text/plain; charset=utf-8")
+    return FileResponse(path, media_type="text/plain; charset=utf-8")
 
 
 @app.get("/")
