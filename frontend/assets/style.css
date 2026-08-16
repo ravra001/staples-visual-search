@@ -680,6 +680,7 @@ a { color: inherit; text-decoration: none; }
   overflow: hidden;
   cursor: crosshair;
   user-select: none;
+  touch-action: none;   /* stop the browser's own scroll/pan/zoom from competing with a drag gesture on touch */
 }
 .vs-crop-stage img { width: 100%; height: 100%; object-fit: contain; pointer-events: none; }
 .vs-crop-box { position: absolute; border: 2px dashed #fff; background: rgba(255,255,255,0.15); pointer-events: none; }

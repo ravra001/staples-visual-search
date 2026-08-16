@@ -1066,7 +1066,14 @@ function _buildCropModal() {
   const confirmBtn = modal.querySelector("#vs-crop-confirm");
   let dragging = false, startX = 0, startY = 0;
 
-  stage.addEventListener("mousedown", (e) => {
+  // Pointer Events unify mouse/touch/pen in one set of handlers (the
+  // original mouse-only version was dead on a tablet or touchscreen
+  // laptop). Pointer capture keeps move/up events targeted at the stage
+  // even if the finger/cursor drifts outside its bounds mid-drag, so these
+  // can live on the stage element itself instead of needing permanent
+  // window-level listeners.
+  stage.addEventListener("pointerdown", (e) => {
+    stage.setPointerCapture(e.pointerId);
     const r = stage.getBoundingClientRect();
     startX = e.clientX - r.left;
     startY = e.clientY - r.top;
@@ -1076,7 +1083,7 @@ function _buildCropModal() {
     confirmBtn.disabled = true;
     e.preventDefault();
   });
-  window.addEventListener("mousemove", (e) => {
+  stage.addEventListener("pointermove", (e) => {
     if (!dragging) return;
     const r = stage.getBoundingClientRect();
     const curX = Math.max(0, Math.min(e.clientX - r.left, r.width));
@@ -1086,9 +1093,10 @@ function _buildCropModal() {
     Object.assign(box.style, { left: `${x}px`, top: `${y}px`, width: `${w}px`, height: `${h}px` });
     _cropRect = { x, y, w, h };
   });
-  window.addEventListener("mouseup", () => {
+  stage.addEventListener("pointerup", (e) => {
     if (!dragging) return;
     dragging = false;
+    stage.releasePointerCapture(e.pointerId);
     confirmBtn.disabled = !_cropRect || _cropRect.w < 20 || _cropRect.h < 20;
   });
 
