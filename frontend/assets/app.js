@@ -677,9 +677,12 @@ function startVisualSearch(file) {
   }
 }
 
-// Remembered so the category chip / refine box can re-run the same photo
-// with a different scope or refinement without asking the user to re-upload.
+// Remembered so the category chip / refine box can re-run the same query
+// (a photo OR a "find similar" sku — mutually exclusive, see runVisualSearch
+// and runSimilarSearch) with a different scope/sort/refinement without
+// asking the user to re-upload or re-click.
 let _lastQueryFile = null;
+let _lastQuerySku = null;
 let _lastRefineText = "";
 
 // The last successful result set (from an upload, a text refine, or a
@@ -787,6 +790,7 @@ function renderSortControl() {
 
 async function runVisualSearch(file, opts = {}) {
   _lastQueryFile = file;
+  _lastQuerySku = null;   // mutually exclusive with "find similar" mode — see runSimilarSearch
   const scope = opts.scope || "auto";
   const refineText = opts.refineText !== undefined ? opts.refineText : _lastRefineText;
   _lastRefineText = refineText;
@@ -837,6 +841,15 @@ async function runVisualSearch(file, opts = {}) {
 // visual text remains still gets sent through as a real refinement instead
 // of being silently dropped. Rendered fresh after every search so it
 // reflects the current photo/refinement state.
+// Re-runs whichever query is currently active — an uploaded photo or a
+// "find similar" sku are mutually exclusive (see runVisualSearch /
+// runSimilarSearch), so the refine box doesn't need to know which mode
+// it's in; it just re-fires the same one with new options.
+function _reRunCurrentQuery(opts) {
+  if (_lastQuerySku) runSimilarSearch(_lastQuerySku, opts);
+  else if (_lastQueryFile) runVisualSearch(_lastQueryFile, opts);
+}
+
 function renderRefineBox(data) {
   const mount = document.getElementById("vs-refine");
   if (!mount) return;
@@ -849,14 +862,14 @@ function renderRefineBox(data) {
   mount.querySelector("#vs-refine-form").addEventListener("submit", (e) => {
     e.preventDefault();
     const text = mount.querySelector("#vs-refine-input").value.trim();
-    if (!text) { if (_lastQueryFile) runVisualSearch(_lastQueryFile, { refineText: "" }); return; }
+    if (!text) { _reRunCurrentQuery({ refineText: "" }); return; }
 
     const { sort, maxPrice, residualText } = _parsePriceIntent(text);
     if (sort) {
       if (residualText) {
         // Compound: apply the price sort/cap AND send the leftover visual
         // text through as a real refinement, instead of dropping it.
-        if (_lastQueryFile) runVisualSearch(_lastQueryFile, { refineText: residualText, sort, maxPrice });
+        _reRunCurrentQuery({ refineText: residualText, sort, maxPrice });
       } else {
         // Price-only: sort-in-place, leaves _lastRefineText (and thus the
         // underlying match set) untouched, so a prior visual refinement
@@ -867,10 +880,10 @@ function renderRefineBox(data) {
       }
       return;
     }
-    if (_lastQueryFile) runVisualSearch(_lastQueryFile, { refineText: text });
+    _reRunCurrentQuery({ refineText: text });
   });
   mount.querySelector("#vs-refine-clear")?.addEventListener("click", () => {
-    if (_lastQueryFile) runVisualSearch(_lastQueryFile, { refineText: "" });
+    _reRunCurrentQuery({ refineText: "" });
   });
 }
 
@@ -983,17 +996,28 @@ function renderCategoryChip(data) {
 // "Find similar" entry point (product cards / PDP link to
 // visual-search.html?sku=...) — queries FROM an existing catalog product's
 // own vector instead of an uploaded photo. No file, no embedding call.
-async function runSimilarSearch(sku) {
+// Supports the same refine/sort/price-cap options as runVisualSearch — the
+// refine box used to be hidden entirely here (text refinement was only
+// wired up for an uploaded photo), but the backend's refine logic never
+// actually cared where the "pure image" vector came from, so there was no
+// real reason "find similar, but in black" couldn't work identically to
+// refining an upload.
+async function runSimilarSearch(sku, opts = {}) {
+  _lastQuerySku = sku;
+  _lastQueryFile = null;   // mutually exclusive with photo-search mode — see runVisualSearch
+  const refineText = opts.refineText !== undefined ? opts.refineText : _lastRefineText;
+  _lastRefineText = refineText;
+  _currentSort = opts.sort || "match";
+  _currentMaxPrice = opts.maxPrice != null ? opts.maxPrice : null;
+
   const statusEl = document.getElementById("vs-status");
   const grid = document.getElementById("listing-grid");
   const thumb = document.getElementById("query-thumb");
   const hint = document.querySelector(".vs-query-hint");
   const chip = document.getElementById("vs-category-chip");
-  const refineMount = document.getElementById("vs-refine");
   const statsEl = document.getElementById("vs-stats");
 
   if (chip) chip.hidden = true;
-  if (refineMount) refineMount.innerHTML = "";   // text refinement needs a photo query, not a stored-product one
   statusEl.textContent = "Finding similar products…";
   _clearVsExtra();
   grid.innerHTML = `<div class="state-msg"><div class="spinner"></div>Finding similar products…</div>`;
@@ -1005,8 +1029,10 @@ async function runSimilarSearch(sku) {
     if (thumb) thumb.src = product.image_url;
     if (hint) hint.textContent = `Products that visually match "${product.name}".`;
 
+    const qs = new URLSearchParams();
+    if (refineText) qs.set("refine_text", refineText);
     const t0 = performance.now();
-    const res = await fetch(`${API_BASE}/api/products/${encodeURIComponent(sku)}/similar`);
+    const res = await fetch(`${API_BASE}/api/products/${encodeURIComponent(sku)}/similar?${qs}`);
     if (!res.ok) throw new Error("Could not find similar products");
     const data = await res.json();
     const tookMs = Math.round(performance.now() - t0);
@@ -1017,14 +1043,13 @@ async function runSimilarSearch(sku) {
       // no match_threshold on this endpoint's response, so every item counts
       // as a "strong match" there, which reads fine for a find-similar context.
       _lastResultData = data;
-      _currentSort = "match";
-      _currentMaxPrice = null;
       applySortAndRender();
     } else {
       _lastResultData = null;
       statusEl.textContent = "No similar products found";
       grid.innerHTML = `<div class="state-msg">Couldn't find anything visually similar to this product.</div>`;
     }
+    renderRefineBox(data);
   } catch (e) {
     statusEl.textContent = "Something went wrong.";
     grid.innerHTML = `<div class="state-msg">${e.message}.</div>`;

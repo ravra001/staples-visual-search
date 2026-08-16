@@ -491,35 +491,53 @@ def _do_visual_search(image_bytes, top_k, scope, refine_text=""):
     return {"cls": cls, "scoped": scoped, "matches": matches, "searched": searched}
 
 
-def _do_similar_search(sku, top_k):
-    """'Find similar' — query FROM an existing catalog product's own image
-    vector instead of an uploaded photo. No re-embedding needed (the vector
-    is already stored); reuses the same rank/display machinery as a real
-    visual search once it has a query vector. Returns None if sku is unknown,
-    else [(sku, display_score), ...] with the source product excluded."""
+def _get_pure_image_vector(sku):
+    """Pure-image vector for an existing catalog product, L2-normalized, or
+    None if the sku is unknown."""
     if DATA_BACKEND == "sql":
         qvec = sql_repo.get_image_embedding(sku)
         if qvec is None:
             return None
-        qn = qvec / (np.linalg.norm(qvec) + 1e-8)
-        ranked = sql_repo.search_by_vector(qn.tolist(), category=None, k=top_k + 1)
-        return [(s, disp) for s, _rank_score, disp in ranked if s != sku][:top_k]
+        return qvec / (np.linalg.norm(qvec) + 1e-8)
     else:
         i = _sku_row.get(sku)
         if i is None:
             return None
         qn = _index_image_matrix[i] if _index_image_matrix.size else _index_matrix[i]
-        ranked = _rank(qn, top_k + 1)
-        disp = _display_scores(qn, [s for s, _ in ranked])
-        return [(s, disp.get(s, sc)) for s, sc in ranked if s != sku][:top_k]
+        return qn / (np.linalg.norm(qn) + 1e-8)
+
+
+def _do_similar_search(sku, top_k, refine_text=""):
+    """'Find similar' — query FROM an existing catalog product's own image
+    vector instead of an uploaded photo. No re-embedding needed (the vector
+    is already stored); reuses _search_matches, the exact same machinery a
+    real visual search uses, INCLUDING its pool-constrained text-refinement
+    safety when refine_text is given — "find similar, but in black" behaves
+    identically to refining an uploaded photo, not a separate code path.
+    Returns None if sku is unknown, else [(sku, display_score), ...] with
+    the source product excluded."""
+    qn_image = _get_pure_image_vector(sku)
+    if qn_image is None:
+        return None
+
+    qn_blend = None
+    if refine_text and EMBEDDING_BACKEND == "clip":
+        text_vec = embed_text_clip(refine_text[:200])
+        tn = text_vec / (np.linalg.norm(text_vec) + 1e-8)
+        qn_blend = REFINE_IMAGE_WEIGHT * qn_image + (1 - REFINE_IMAGE_WEIGHT) * tn
+        qn_blend = qn_blend / (np.linalg.norm(qn_blend) + 1e-8)
+
+    matches = _search_matches(qn_image, qn_blend, None, top_k + 1)
+    return [(s, score) for s, score in matches if s != sku][:top_k]
 
 
 @app.get("/api/products/{sku}/similar")
-def similar_products(sku: str, top_k: int = 12):
+def similar_products(sku: str, top_k: int = 12, refine_text: str = ""):
     """Visually similar products to an existing catalog item — powers "find
-    similar" on product cards/PDPs without requiring an upload."""
+    similar" on product cards/PDPs without requiring an upload. refine_text
+    works the same as it does for a real visual search (see _do_visual_search)."""
     top_k = max(1, min(int(top_k), 50))
-    matches = _do_similar_search(sku, top_k)
+    matches = _do_similar_search(sku, top_k, (refine_text or "").strip())
     if matches is None:
         raise HTTPException(404, "Product not found")
     by_sku = get_products_by_skus([s for s, _ in matches])
@@ -530,7 +548,7 @@ def similar_products(sku: str, top_k: int = 12):
             item = _serialize(p)
             item["match_score"] = round(score * 100, 1)
             results.append(item)
-    return {"count": len(results), "items": results}
+    return {"count": len(results), "items": results, "refine_text": refine_text or None}
 
 
 SHOP_ROOM_GRID = 2          # NxN tile sweep of the uploaded photo — kept small
