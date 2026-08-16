@@ -353,8 +353,15 @@ def list_categories():
 
 @app.get("/api/search")
 def text_search(q: str = "", limit: int | None = config.PAGE_SIZE, offset: int = 0):
-    items = search_products(q)
-    total, window = _page(items, limit, offset)
+    if DATA_BACKEND == "sql":
+        # Paginated in SQL (LIMIT/OFFSET + COUNT) — same reasoning as
+        # /api/products: never fetch every match just to slice one page.
+        offset = max(int(offset), 0)
+        limit = max(1, min(int(limit), _MAX_PAGE_SIZE)) if limit is not None else _MAX_PAGE_SIZE
+        total, window = sql_repo.search_products_page(q, limit, offset)
+    else:
+        items = search_products(q)
+        total, window = _page(items, limit, offset)
     return {"count": total, "query": q, "offset": offset, "limit": limit,
             "items": [_serialize(p) for p in window]}
 

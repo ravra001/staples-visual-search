@@ -165,6 +165,30 @@ def search_products(query):
         return [p.as_dict() for p in stmt.all()]
 
 
+def search_products_page(query, limit=24, offset=0):
+    """Paginated text search — same AND-across-terms LIKE matching as
+    search_products, but with LIMIT/OFFSET and COUNT pushed down to
+    Postgres instead of fetching every match (every column, full
+    description text included) just to slice one page of it in Python.
+    Used by /api/search. Returns (total_count, [product dict, ...])."""
+    q = (query or "").strip()
+    if not q:
+        return 0, []
+    with SessionLocal() as s:
+        base = select(Product)
+        for term in q.lower().split():
+            like = f"%{term}%"
+            base = base.where(or_(
+                func.lower(Product.name).like(like),
+                func.lower(Product.brand).like(like),
+                func.lower(Product.category).like(like),
+                func.lower(Product.description).like(like),
+            ))
+        total = s.execute(select(func.count()).select_from(base.subquery())).scalar_one()
+        rows = s.execute(base.order_by(Product.sku).limit(limit).offset(offset)).scalars().all()
+        return total, [p.as_dict() for p in rows]
+
+
 # --------------------------------------------------------------------------
 # Vector search — this is what DATA_BACKEND=sql actually changes vs. memory
 # --------------------------------------------------------------------------
