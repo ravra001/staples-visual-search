@@ -752,6 +752,27 @@ body.vs-dragging::after {
   color: var(--ink);
   background: #fff;
 }
+.vs-sort-cap {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-left: 10px;
+  padding: 4px 6px 4px 10px;
+  background: #fdf3f3;
+  border: 1px solid #f3d6d6;
+  border-radius: 12px;
+  font-size: 12px;
+  color: var(--staples-red);
+}
+.vs-sort-cap button {
+  background: none;
+  border: none;
+  padding: 0 2px;
+  font-size: 14px;
+  line-height: 1;
+  color: var(--staples-red);
+  cursor: pointer;
+}
 
 .vs-refine-form { display: flex; gap: 8px; margin-top: 12px; max-width: 480px; }
 .vs-refine-form input[type="text"] {

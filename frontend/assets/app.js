@@ -693,17 +693,57 @@ let _lastRefineText = "";
 // best matches (re-ranks via CLIP); "cheaper" only changes the ORDER you see
 // them in (sorts), without discarding the visual refinement already applied.
 let _lastResultData = null;
-let _currentSort = "match";   // "match" | "price-asc" | "price-desc"
+let _currentSort = "match";      // "match" | "price-asc" | "price-desc"
+let _currentMaxPrice = null;     // set by an explicit "under $X" refinement; null = no cap
 
-function _detectPriceIntent(text) {
-  const t = text.toLowerCase();
-  if (/\b(cheap(er|est)?|budget|affordable|inexpensive|lower[- ]?price|less expensive|under \$?\d+)\b/.test(t)) return "price-asc";
-  if (/\b(expensive|pricier|pricey|premium|higher[- ]?end|luxury|splurge|top[- ]?shelf)\b/.test(t)) return "price-desc";
-  return null;
+// Parses a refine-box string into its price-intent parts and whatever visual
+// text is left over. Two things this fixes vs. a bare keyword match:
+//   1. "under $50" previously just triggered an ascending sort — the number
+//      was matched by the regex but never actually used to filter anything,
+//      so a $300 item could still show up. Now it's captured and applied as
+//      a real price cap.
+//   2. A compound query like "cheaper black one" previously matched the
+//      price branch and returned early, silently dropping "black" — the
+//      CLIP refinement never ran. Now the price phrase is stripped out and
+//      whatever visual text remains is still sent through as a refinement.
+// Returns { sort, maxPrice, residualText }. sort/maxPrice are null when no
+// price intent was found at all; residualText is "" when the whole input
+// was a price phrase (safe to treat as sort-only, no network call needed).
+function _parsePriceIntent(text) {
+  let t = text;
+  let sort = null;
+  let maxPrice = null;
+
+  const underMatch = t.match(/\b(?:under|below|less than)\s*\$?(\d+(?:\.\d+)?)\b/i);
+  if (underMatch) {
+    maxPrice = parseFloat(underMatch[1]);
+    sort = "price-asc";
+    t = t.slice(0, underMatch.index) + t.slice(underMatch.index + underMatch[0].length);
+  } else {
+    const cheapMatch = t.match(/\b(cheap(er|est)?|budget|affordable|inexpensive|lower[- ]?price|less expensive)\b/i);
+    if (cheapMatch) {
+      sort = "price-asc";
+      t = t.slice(0, cheapMatch.index) + t.slice(cheapMatch.index + cheapMatch[0].length);
+    } else {
+      const pricyMatch = t.match(/\b(expensive|pricier|pricey|premium|higher[- ]?end|luxury|splurge|top[- ]?shelf)\b/i);
+      if (pricyMatch) {
+        sort = "price-desc";
+        t = t.slice(0, pricyMatch.index) + t.slice(pricyMatch.index + pricyMatch[0].length);
+      }
+    }
+  }
+
+  // Tidy up connector words/punctuation left behind by stripping the price
+  // phrase ("cheaper one" -> "one", "cheaper, black" -> ", black").
+  const residualText = t.replace(/\b(one|item|version|option|please|thanks?)\b/gi, "")
+    .replace(/^[\s,.-]+|[\s,.-]+$/g, "").replace(/\s{2,}/g, " ").trim();
+
+  return { sort, maxPrice, residualText };
 }
 
 function _sortedItems() {
-  const items = (_lastResultData && _lastResultData.items) || [];
+  let items = (_lastResultData && _lastResultData.items) || [];
+  if (_currentMaxPrice != null) items = items.filter(p => p.price <= _currentMaxPrice);
   if (_currentSort === "price-asc") return [...items].sort((a, b) => a.price - b.price);
   if (_currentSort === "price-desc") return [...items].sort((a, b) => b.price - a.price);
   return items;   // "match" — server already returns items in match-score order
@@ -723,6 +763,9 @@ function applySortAndRender() {
 function renderSortControl() {
   const mount = document.getElementById("vs-sort");
   if (!mount || !_lastResultData || !(_lastResultData.items || []).length) { if (mount) mount.innerHTML = ""; return; }
+  const priceNote = _currentMaxPrice != null
+    ? `<span class="vs-sort-cap">under $${_currentMaxPrice.toFixed(0)} <button type="button" id="vs-sort-cap-clear" title="Remove price cap">×</button></span>`
+    : "";
   mount.innerHTML = `
     <label class="vs-sort-label">Sort
       <select id="vs-sort-select">
@@ -730,9 +773,14 @@ function renderSortControl() {
         <option value="price-asc"${_currentSort === "price-asc" ? " selected" : ""}>Price: Low to High</option>
         <option value="price-desc"${_currentSort === "price-desc" ? " selected" : ""}>Price: High to Low</option>
       </select>
-    </label>`;
+    </label>${priceNote}`;
   mount.querySelector("#vs-sort-select").addEventListener("change", (e) => {
     _currentSort = e.target.value;
+    _currentMaxPrice = null;   // the dropdown re-sorts the full set; only the text box sets a cap
+    applySortAndRender();
+  });
+  mount.querySelector("#vs-sort-cap-clear")?.addEventListener("click", () => {
+    _currentMaxPrice = null;
     applySortAndRender();
   });
 }
@@ -742,7 +790,8 @@ async function runVisualSearch(file, opts = {}) {
   const scope = opts.scope || "auto";
   const refineText = opts.refineText !== undefined ? opts.refineText : _lastRefineText;
   _lastRefineText = refineText;
-  _currentSort = "match";   // a real (re-)search always starts from best-match order
+  _currentSort = opts.sort || "match";               // a real (re-)search starts from best-match order...
+  _currentMaxPrice = opts.maxPrice != null ? opts.maxPrice : null;   // ...unless a compound refine ("cheaper black one") carried a price intent along with it
   const statusEl = document.getElementById("vs-status");
   const grid = document.getElementById("listing-grid");
 
@@ -778,12 +827,16 @@ async function runVisualSearch(file, opts = {}) {
   }
 }
 
-// "but in black" / "cheaper" text box. Visual refinements ("in black") blend
-// a CLIP text embedding into the query and re-rank (see backend's
-// refine_text param). Price refinements ("cheaper") are detected by keyword
-// and just re-sort the CURRENT results — see _detectPriceIntent above for
-// why these two are handled by entirely different mechanisms. Rendered fresh
-// after every search so it reflects the current photo/refinement state.
+// "but in black" / "cheaper" / "cheaper black one" text box. Pure visual
+// text ("in black") blends a CLIP text embedding into the query and
+// re-ranks (see backend's refine_text param). Pure price text ("cheaper",
+// "under $50") is parsed and just re-sorts/filters the CURRENT results —
+// see _parsePriceIntent above for why these are handled by entirely
+// different mechanisms. A COMPOUND query ("cheaper black one") does both:
+// the price phrase is stripped out and applied as a sort/cap, and whatever
+// visual text remains still gets sent through as a real refinement instead
+// of being silently dropped. Rendered fresh after every search so it
+// reflects the current photo/refinement state.
 function renderRefineBox(data) {
   const mount = document.getElementById("vs-refine");
   if (!mount) return;
@@ -796,12 +849,22 @@ function renderRefineBox(data) {
   mount.querySelector("#vs-refine-form").addEventListener("submit", (e) => {
     e.preventDefault();
     const text = mount.querySelector("#vs-refine-input").value.trim();
-    const priceIntent = text ? _detectPriceIntent(text) : null;
-    if (priceIntent) {
-      // Sort-only: leaves _lastRefineText (and thus the underlying match set)
-      // untouched, so a prior visual refinement like "in black" survives.
-      _currentSort = priceIntent;
-      applySortAndRender();
+    if (!text) { if (_lastQueryFile) runVisualSearch(_lastQueryFile, { refineText: "" }); return; }
+
+    const { sort, maxPrice, residualText } = _parsePriceIntent(text);
+    if (sort) {
+      if (residualText) {
+        // Compound: apply the price sort/cap AND send the leftover visual
+        // text through as a real refinement, instead of dropping it.
+        if (_lastQueryFile) runVisualSearch(_lastQueryFile, { refineText: residualText, sort, maxPrice });
+      } else {
+        // Price-only: sort-in-place, leaves _lastRefineText (and thus the
+        // underlying match set) untouched, so a prior visual refinement
+        // like "in black" survives.
+        _currentSort = sort;
+        _currentMaxPrice = maxPrice;
+        applySortAndRender();
+      }
       return;
     }
     if (_lastQueryFile) runVisualSearch(_lastQueryFile, { refineText: text });
@@ -955,6 +1018,7 @@ async function runSimilarSearch(sku) {
       // as a "strong match" there, which reads fine for a find-similar context.
       _lastResultData = data;
       _currentSort = "match";
+      _currentMaxPrice = null;
       applySortAndRender();
     } else {
       _lastResultData = null;
