@@ -381,19 +381,98 @@ def list_categories():
     return {"categories": cats}
 
 
+HYBRID_SEARCH_POOL = 100   # depth each side (keyword, semantic) contributes before RRF-fusing
+
+
+def _semantic_search_skus(query_text, k=HYBRID_SEARCH_POOL):
+    """Ordered sku list from ranking the query's CLIP TEXT embedding against
+    the catalog's FUSED vectors (not pure-image) — with text_fusion enabled,
+    those vectors are already ~70% the CLIP text embedding of each product's
+    own name/brand/description, so a text query against them is a much
+    stronger signal than against pure-image vectors would be.
+
+    Returns None (not an empty list) when the clip backend isn't active, so
+    callers can tell "no text tower available" apart from "found nothing" —
+    heuristic/vertex don't have embed_text_clip (same gate the refine-by-text
+    feature already uses for the same reason)."""
+    if EMBEDDING_BACKEND != "clip":
+        return None
+    text_vec = embed_text_clip(query_text[:200])
+    qn = text_vec / (np.linalg.norm(text_vec) + 1e-8)
+    if DATA_BACKEND == "sql":
+        ranked = sql_repo.search_by_vector(qn.tolist(), k=k)
+        return [sku for sku, _rank_score, _disp in ranked]
+    return [sku for sku, _score in _rank(qn, k)]
+
+
+def _rrf_fuse(named_rankings, k=60, limit=HYBRID_SEARCH_POOL):
+    """Reciprocal Rank Fusion: combine independently-ranked sku lists into
+    one, without needing their scores to be on the same scale — they
+    aren't. LIKE-matching has no continuous score at all, and CLIP
+    text-image cosines aren't calibrated against keyword-match strength, so
+    blending the two as numbers would be meaningless. Each list contributes
+    1/(k+rank) per sku it contains; a sku ranked near the top of either
+    list — or appearing in both — rises to the top of the fused result.
+
+    named_rankings: [(source_name, [sku, ...]), ...], each list best-first.
+    Returns [(sku, rrf_score, {source_name, ...}), ...] sorted desc — the
+    source set is what powers the "keyword"/"semantic"/"both" match_reason
+    badge in the frontend."""
+    scores, sources = {}, {}
+    for name, ranking in named_rankings:
+        for i, sku in enumerate(ranking):
+            scores[sku] = scores.get(sku, 0.0) + 1.0 / (k + i + 1)
+            sources.setdefault(sku, set()).add(name)
+    ranked = sorted(scores, key=scores.get, reverse=True)[:limit]
+    return [(sku, scores[sku], sources[sku]) for sku in ranked]
+
+
 @app.get("/api/search")
 def text_search(q: str = "", limit: int | None = config.PAGE_SIZE, offset: int = 0):
+    """Hybrid keyword + semantic search. The existing LIKE-based keyword
+    match (ranked by name-hit relevance rather than arbitrary sku order —
+    see search_products_ranked_skus / _mem_search) is fused via Reciprocal
+    Rank Fusion with a CLIP-text-tower semantic ranking against the
+    catalog's fused vectors. Keyword alone misses anything phrased
+    differently than the catalog text ("something to print with" matches
+    nothing containing "print"); semantic alone can rank a literal
+    exact-name hit below something merely topically similar. RRF gets both
+    without trying to compare their scores directly (not meaningful — see
+    _rrf_fuse). Falls back to keyword-only, still with the relevance-order
+    fix, when the active embedding backend has no text tower."""
+    q = (q or "").strip()
+    limit = max(1, min(int(limit), _MAX_PAGE_SIZE)) if limit is not None else _MAX_PAGE_SIZE
+    offset = max(int(offset), 0)
+    if not q:
+        return {"count": 0, "query": q, "offset": offset, "limit": limit, "items": []}
+
     if DATA_BACKEND == "sql":
-        # Paginated in SQL (LIMIT/OFFSET + COUNT) — same reasoning as
-        # /api/products: never fetch every match just to slice one page.
-        offset = max(int(offset), 0)
-        limit = max(1, min(int(limit), _MAX_PAGE_SIZE)) if limit is not None else _MAX_PAGE_SIZE
-        total, window = sql_repo.search_products_page(q, limit, offset)
+        keyword_skus = sql_repo.search_products_ranked_skus(q, limit=HYBRID_SEARCH_POOL)
     else:
-        items = search_products(q)
-        total, window = _page(items, limit, offset)
-    return {"count": total, "query": q, "offset": offset, "limit": limit,
-            "items": [_serialize(p) for p in window]}
+        keyword_skus = [p["sku"] for p in search_products(q)][:HYBRID_SEARCH_POOL]
+
+    semantic_skus = _semantic_search_skus(q)
+    rankings = [("keyword", keyword_skus)]
+    if semantic_skus is not None:
+        rankings.append(("semantic", semantic_skus))
+    fused = _rrf_fuse(rankings)
+
+    # RRF fuses a bounded pool (HYBRID_SEARCH_POOL per side) rather than the
+    # whole catalog, so `count` here is that fused pool's size, not a true
+    # total match count — same "bounded, not silently unbounded" tradeoff
+    # REFINE_POOL_SIZE already makes elsewhere in this app.
+    total = len(fused)
+    window = fused[offset:offset + limit]
+    by_sku = get_products_by_skus([sku for sku, _score, _sources in window])
+    items = []
+    for sku, _score, sources in window:
+        p = by_sku.get(sku)
+        if p:
+            item = _serialize(p)
+            item["match_reason"] = "both" if len(sources) > 1 else next(iter(sources))
+            items.append(item)
+
+    return {"count": total, "query": q, "offset": offset, "limit": limit, "items": items}
 
 
 @app.get("/api/config")

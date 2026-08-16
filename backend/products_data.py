@@ -165,16 +165,24 @@ def _mem_by_category(category):
     return [p for p in PRODUCTS if p["category"] == category]
 
 def _mem_search(query):
+    """AND-across-terms substring match, ordered by relevance (how many
+    terms matched in the NAME specifically -- a stronger signal than a term
+    only appearing in the description) rather than left in arbitrary
+    catalog order. See products_repo_sql.search_products_ranked_skus for
+    the sql-backend equivalent; both feed main.py's hybrid text_search."""
     q = (query or "").strip().lower()
     if not q:
         return []
     terms = q.split()
-    results = []
+    scored = []
     for p in PRODUCTS:
         haystack = f"{p['name']} {p.get('brand', '')} {p['category']} {p.get('description', '')}".lower()
         if all(t in haystack for t in terms):
-            results.append(p)
-    return results
+            name_l = p["name"].lower()
+            relevance = sum(1 for t in terms if t in name_l)
+            scored.append((relevance, p))
+    scored.sort(key=lambda pair: -pair[0])
+    return [p for _relevance, p in scored]
 
 
 # --------------------------------------------------------------------------

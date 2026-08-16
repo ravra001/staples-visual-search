@@ -407,6 +407,23 @@ a { color: inherit; text-decoration: none; }
   padding: 3px 8px;
   border-radius: 12px;
 }
+
+/* Hybrid text search's "why this showed up" badge — see main.py's
+   text_search / _rrf_fuse (match_reason: keyword | semantic | both). */
+.match-reason-badge {
+  position: absolute;
+  top: 10px;
+  left: 10px;
+  font-size: 10px;
+  font-weight: 700;
+  padding: 3px 8px;
+  border-radius: 12px;
+  background: #fff;
+  border: 1px solid var(--border);
+  color: var(--gray-text);
+}
+.match-reason-badge.match-reason-both { background: var(--staples-red); border-color: var(--staples-red); color: #fff; }
+.match-reason-badge.match-reason-semantic { color: var(--staples-red); border-color: var(--staples-red); }
 .product-media { position: relative; }
 .product-media > a { display: block; }
 .find-similar-link {

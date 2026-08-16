@@ -32,7 +32,7 @@ import os
 
 import numpy as np
 from sqlalchemy import (
-    Column, DateTime, Float, Index, Integer, String, Text, create_engine,
+    Column, DateTime, Float, Index, Integer, String, Text, case, create_engine,
     func, or_, select, text,
 )
 from sqlalchemy.orm import declarative_base, sessionmaker
@@ -171,28 +171,34 @@ def search_products(query):
         return [p.as_dict() for p in stmt.all()]
 
 
-def search_products_page(query, limit=24, offset=0):
-    """Paginated text search — same AND-across-terms LIKE matching as
-    search_products, but with LIMIT/OFFSET and COUNT pushed down to
-    Postgres instead of fetching every match (every column, full
-    description text included) just to slice one page of it in Python.
-    Used by /api/search. Returns (total_count, [product dict, ...])."""
+def search_products_ranked_skus(query, limit=100):
+    """Ordered sku list for the keyword side of hybrid text search (see
+    main.py's text_search) — same AND-across-terms LIKE matching as
+    search_products, but ranked instead of left in arbitrary Product.sku
+    order: a term matching in the NAME is a much stronger relevance signal
+    than the same term only appearing somewhere in the description, so
+    name-hit count is used as the primary sort key. Returns skus only
+    (not full rows) since the caller RRF-fuses this against a separately
+    ranked semantic list and needs an ORDER, not row data — full product
+    dicts are fetched once for the final fused page via get_products_by_skus."""
     q = (query or "").strip()
     if not q:
-        return 0, []
+        return []
     with SessionLocal() as s:
-        base = select(Product)
+        stmt = select(Product.sku)
+        name_hit_terms = []
         for term in q.lower().split():
             like = f"%{_like_escape(term)}%"
-            base = base.where(or_(
+            stmt = stmt.where(or_(
                 func.lower(Product.name).like(like, escape="\\"),
                 func.lower(Product.brand).like(like, escape="\\"),
                 func.lower(Product.category).like(like, escape="\\"),
                 func.lower(Product.description).like(like, escape="\\"),
             ))
-        total = s.execute(select(func.count()).select_from(base.subquery())).scalar_one()
-        rows = s.execute(base.order_by(Product.sku).limit(limit).offset(offset)).scalars().all()
-        return total, [p.as_dict() for p in rows]
+            name_hit_terms.append(case((func.lower(Product.name).like(like, escape="\\"), 1), else_=0))
+        relevance = sum(name_hit_terms[1:], name_hit_terms[0]) if name_hit_terms else 0
+        stmt = stmt.order_by(relevance.desc(), Product.sku).limit(limit)
+        return [row[0] for row in s.execute(stmt).all()]
 
 
 # --------------------------------------------------------------------------

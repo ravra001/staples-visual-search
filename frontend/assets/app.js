@@ -348,14 +348,19 @@ function starString(rating) {
   return "★".repeat(full) + "☆".repeat(5 - full);
 }
 
+const MATCH_REASON_LABELS = { keyword: "Keyword match", semantic: "Semantic match", both: "Strong match" };
+
 function productCardHTML(p, opts = {}) {
   const matchBadge = p.match_score !== undefined
     ? `<div class="match-badge">${p.match_score}% match</div>`
     : "";
+  const matchReasonBadge = p.match_reason
+    ? `<div class="match-reason-badge match-reason-${esc(p.match_reason)}">${esc(MATCH_REASON_LABELS[p.match_reason] || p.match_reason)}</div>`
+    : "";
   const href = `/product.html?sku=${encodeURIComponent(p.sku)}`;
   return `
     <div class="product-card" data-sku="${esc(p.sku)}">
-      ${matchBadge}
+      ${matchBadge}${matchReasonBadge}
       <div class="product-media">
         <a href="${href}"><img src="${esc(p.image_url)}" alt="${esc(p.name)}" loading="lazy" /></a>
         <a class="find-similar-link" href="/visual-search.html?sku=${encodeURIComponent(p.sku)}" title="Find visually similar products">
