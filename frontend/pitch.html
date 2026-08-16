@@ -1,0 +1,230 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Project Overview | Staples Visual Search</title>
+<link rel="stylesheet" href="/assets/style.css" />
+</head>
+<body>
+
+<div id="site-header"></div>
+
+<section class="pitch-hero">
+  <div class="pitch-hero-inner">
+    <span class="pitch-eyebrow">Hackathon Project Overview</span>
+    <h1>A camera icon on the search bar, and everything behind it is real.</h1>
+    <p class="pitch-sub">Staples Visual Search turns "I want that, whatever it is" into a ranked cart in
+       under a second — built on a real 10,000-product catalog, deployed on real GCP infrastructure, with
+       real production bugs found and fixed along the way.</p>
+    <div class="pitch-hero-ctas">
+      <a href="/" class="hero-cta">Try the live demo</a>
+      <a href="/architecture.html" class="pitch-cta-ghost">See the architecture</a>
+    </div>
+    <div class="pitch-stats">
+      <div class="pitch-stat"><b>10,000</b><span>real products, real photos<br/>(Amazon Berkeley Objects)</span></div>
+      <div class="pitch-stat"><b>6</b><span>ways to search — photo, text-refine,<br/>find-similar, room, crop, price</span></div>
+      <div class="pitch-stat"><b>&lt;1s</b><span>warm search latency<br/>on live Cloud Run + Cloud SQL</span></div>
+      <div class="pitch-stat"><b>Live</b><span>not a mockup — a real<br/>Cloud Run URL, right now</span></div>
+    </div>
+  </div>
+</section>
+
+<main class="pitch-page">
+
+  <!-- ============ THE PROBLEM ============ -->
+  <section class="pitch-section">
+    <p class="pitch-kicker">The problem</p>
+    <h2>You know it when you see it. You don't know what to type.</h2>
+    <p class="pitch-lead">"Mid-century curved-back accent chair in ash grey" is not how anyone shops. A
+       customer who sees a chair they like — in a friend's apartment, a magazine, a photo they took — has
+       to translate what they're looking at into a search box's language, and that translation step is
+       where intent leaks away. A camera icon skips it: the photo <em>is</em> the query.</p>
+  </section>
+
+  <!-- ============ WHAT WE BUILT ============ -->
+  <section class="pitch-section">
+    <p class="pitch-kicker">What we built</p>
+    <h2>Six ways to search, one shared engine underneath</h2>
+    <p class="pitch-lead">Every mode below is a variation on the same core idea — turn something into a
+       vector, compare it to the catalog — not six separate features bolted together. That's why adding
+       text refinement to "Find Similar" after it already worked for photo search was a small change, not a
+       new subsystem.</p>
+    <div class="pitch-feature-grid">
+
+      <div class="pitch-feature-card">
+        <div class="pitch-feature-icon">
+          <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 8a2 2 0 0 1 2-2h1.5l1-1.5h7l1 1.5H18a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V8z"/><circle cx="12" cy="12.5" r="3.5"/></svg>
+        </div>
+        <h3>Visual Search</h3>
+        <p>Upload a photo of any chair, lamp, rug, or décor item and get back the closest real matches from
+           10,000 products, ranked by CLIP embedding similarity — with an honest "no strong matches" state
+           when the item genuinely isn't in the catalog, instead of forcing a bad guess.</p>
+        <span class="pitch-feature-value">Zero-typing product discovery</span>
+      </div>
+
+      <div class="pitch-feature-card">
+        <div class="pitch-feature-icon">
+          <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 6h16M4 12h10M4 18h6"/></svg>
+        </div>
+        <h3>Text Refinement</h3>
+        <p>Found a chair you like the shape of, but want it in black? Type it. The refinement blends into
+           the visual query rather than replacing it, and is constrained to only reorder items that already
+           matched — it can't wander into unrelated results the way a naive text search can.</p>
+        <span class="pitch-feature-value">Refine without losing the visual match</span>
+      </div>
+
+      <div class="pitch-feature-card">
+        <div class="pitch-feature-icon">
+          <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/></svg>
+        </div>
+        <h3>Find Similar</h3>
+        <p>Every product page and product card has a one-click "Find similar," plus a "Similar for less"
+           rail — the same visual neighborhood, filtered to strictly cheaper alternatives. No upload needed;
+           it queries from the product's own vector, already computed.</p>
+        <span class="pitch-feature-value">Cross-sell &amp; price-conscious upsell, automatically</span>
+      </div>
+
+      <div class="pitch-feature-card">
+        <div class="pitch-feature-icon">
+          <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 10.5 12 3l9 7.5"/><path d="M5 9.5V20a1 1 0 0 0 1 1h4v-6h4v6h4a1 1 0 0 0 1-1V9.5"/></svg>
+        </div>
+        <h3>Shop the Room</h3>
+        <p>Upload a photo of a whole room and get back <em>one</em> best match per item detected — the sofa,
+           the rug, the lamp, the wall art — with a running total and one "Add all to cart" button. Not a
+           pile of near-duplicates of whatever object was biggest in frame.</p>
+        <span class="pitch-feature-value">One photo → a filled, multi-item cart</span>
+      </div>
+
+      <div class="pitch-feature-card">
+        <div class="pitch-feature-icon">
+          <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 2v4M6 6h12v12M6 6l12 12M18 18v4M2 6h4M18 22h-4M22 18h-4"/></svg>
+        </div>
+        <h3>Crop-to-Search</h3>
+        <p>A photo with more than one object in it embeds as a blend of everything in frame. Drag a box
+           around just the item you mean, and only that region gets searched — works with touch, not just a
+           mouse.</p>
+        <span class="pitch-feature-value">Handles real, messy, multi-object photos</span>
+      </div>
+
+      <div class="pitch-feature-card">
+        <div class="pitch-feature-icon">
+          <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2"><circle cx="9" cy="21" r="1"/><circle cx="20" cy="21" r="1"/><path d="M1 1h4l2.68 13.39a2 2 0 0 0 2 1.61h9.72a2 2 0 0 0 2-1.61L23 6H6"/></svg>
+        </div>
+        <h3>Cart &amp; Price Intent</h3>
+        <p>"Under $50" and "cheaper" actually filter and sort by real price data — never sent through the ML
+           model, because price isn't something CLIP was ever trained to know. A real cart page tracks line
+           items, quantities, and a live total, not just a badge count.</p>
+        <span class="pitch-feature-value">ML for what it's good at, plain data for the rest</span>
+      </div>
+
+    </div>
+  </section>
+
+  <!-- ============ BUSINESS VALUE ============ -->
+  <section class="pitch-section">
+    <p class="pitch-kicker">Why it matters commercially</p>
+    <h2>This isn't a vision demo. It's a shopping-funnel story.</h2>
+    <div class="pitch-value-grid">
+      <div class="pitch-value-card">
+        <span class="pitch-value-tag">Conversion</span>
+        <h3>Shortens intent-to-cart</h3>
+        <p>Every extra step between "I saw something I want" and "it's in my cart" is a chance to lose the
+           customer. A photo replaces a guessed search query with the exact thing they're looking at.</p>
+      </div>
+      <div class="pitch-value-card">
+        <span class="pitch-value-tag">Average order value</span>
+        <h3>Shop the Room sells the room, not the item</h3>
+        <p>A single photo becomes a multi-item basket with one click — rug, lamp, and wall art added
+           together, not hunted down one search at a time.</p>
+      </div>
+      <div class="pitch-value-card">
+        <span class="pitch-value-tag">Trust &amp; return rate</span>
+        <h3>Honest confidence, not forced results</h3>
+        <p>The threshold-gated "no strong matches" state and calibrated match percentages mean a customer
+           only sees a "match" when it's a real one — the same discipline that keeps returns down when
+           customers buy based on visual similarity.</p>
+      </div>
+      <div class="pitch-value-card">
+        <span class="pitch-value-tag">Retention</span>
+        <h3>"Find similar" turns a dead end into a browse path</h3>
+        <p>Instead of leaving when an item's out of stock or over budget, a customer gets a "similar for
+           less" rail on every product — keeping them shopping instead of leaving the site.</p>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ PRODUCTION PROOF ============ -->
+  <section class="pitch-section">
+    <p class="pitch-kicker">Not a demo — a deployment</p>
+    <h2>Running on real GCP infrastructure, with real production bugs found and fixed</h2>
+    <p class="pitch-lead">This is deployed on Cloud Run, backed by a real Cloud SQL + pgvector instance
+       seeded with all 10,000 products. Building it for real — not just describing the architecture — is
+       what surfaced these:</p>
+    <div class="pitch-proof-row">
+      <div class="pitch-proof-card">
+        <h4>✓ HNSW recall bug, found &amp; fixed</h4>
+        <p>pgvector's default search breadth missed true nearest-neighbors on this catalog size — caught by
+           comparing against an exact in-memory search, fixed with a query-time tuning parameter.</p>
+      </div>
+      <div class="pitch-proof-card">
+        <h4>✓ N+1 seeding bug, found &amp; fixed</h4>
+        <p>A naive per-row check took over 20 minutes against remote Cloud SQL before a single row
+           committed. Batched inserts brought 9,967 rows down to 143 seconds.</p>
+      </div>
+      <div class="pitch-proof-card">
+        <h4>✓ Two backends, verified identical</h4>
+        <p>The in-memory dev backend and the live Postgres/pgvector backend are checked to produce
+           byte-for-byte identical rankings for the same query — not assumed, tested.</p>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ HONEST ROADMAP ============ -->
+  <section class="pitch-section" style="border-bottom:none;">
+    <p class="pitch-kicker">What's next — stated honestly</p>
+    <h2>What's genuinely still ahead, not glossed over</h2>
+    <p class="pitch-lead">Every claim on this page is about what's live today. These are real, scoped next
+       steps — not implemented yet, and not pretended otherwise.</p>
+    <ul class="pitch-roadmap">
+      <li>
+        <span class="pitch-roadmap-badge">Planned</span>
+        <p><b>Benchmark Vertex AI Multimodal Embeddings against local CLIP</b>
+           The code path already exists (one config value swaps it in) but has never been run against
+           production traffic or measured for the real tradeoff — API latency and per-call cost vs. a
+           bundled model's image size and cold-start time.</p>
+      </li>
+      <li>
+        <span class="pitch-roadmap-badge">Planned</span>
+        <p><b>Serve product images from Cloud Storage + Cloud CDN</b>
+           Currently bundled in the container image; moving them out is the single highest-payoff
+           infrastructure change identified so far, and hasn't been built yet.</p>
+      </li>
+      <li>
+        <span class="pitch-roadmap-badge">Planned</span>
+        <p><b>Event-driven re-indexing pipeline</b>
+           Today, re-seeding the catalog is a manual script run. A Pub/Sub-triggered embed worker would make
+           catalog updates flow into search automatically.</p>
+      </li>
+    </ul>
+  </section>
+
+  <div class="pitch-closing">
+    <h2>See it work, not just read about it</h2>
+    <p>Every number and claim on this page is backed by a live URL, a real database, and a repo with the
+       commit history to prove it.</p>
+    <a href="/" class="hero-cta">Open the live demo</a>
+  </div>
+
+</main>
+
+<div id="site-footer"></div>
+
+<script src="/assets/app.js"></script>
+<script>
+  renderSiteChrome();
+  wireVisualSearch('camera-btn', 'visual-search-input');
+  wireTextSearch();
+</script>
+</body>
+</html>

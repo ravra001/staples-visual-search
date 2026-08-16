@@ -15,8 +15,10 @@
   <header class="arch-hero">
     <span class="hero-eyebrow">System Explainer</span>
     <h1>How search-by-photo works</h1>
-    <p>From a user's uploaded photo to eight ranked products — how the catalog is stored, how images
-       become vectors, and how similarity is computed across 10,000 products.</p>
+    <p>From a user's uploaded photo to ranked products — how the catalog is stored, how images become
+       vectors, how similarity is computed across 10,000 products, and how the newer features (text
+       refinement, Find Similar, Shop the Room) reuse the exact same machinery instead of bolting on
+       separate code paths.</p>
   </header>
 
   <!-- ============ CORE IDEA ============ -->
@@ -28,10 +30,12 @@
          a point in a high-dimensional space. With CLIP (our default model) each image becomes a
          <strong>512-number vector</strong>, and the model is trained so that visually similar images land
          <em>close together</em>.</p>
-      <p>So “find similar products” becomes “find the catalog vectors closest to the photo's vector.”
+      <p>So "find similar products" becomes "find the catalog vectors closest to the photo's vector."
          Closeness is <strong>cosine similarity</strong> (the cosine of the angle between two vectors:
          <code>1.0</code> = identical, <code>0</code> = unrelated). Every vector is <strong>L2-normalized</strong>
-         to length 1, so a plain dot product <em>equals</em> cosine similarity — one multiply-add per comparison.</p>
+         to length 1, so a plain dot product <em>equals</em> cosine similarity — one multiply-add per comparison.
+         Every feature on this page — visual search, text refinement, Find Similar, Shop the Room — is a
+         variation on "get a vector, compare it to the catalog's vectors."</p>
     </div>
   </section>
 
@@ -39,22 +43,24 @@
   <section class="arch-section">
     <h2>The pipeline at a glance</h2>
     <p class="arch-lead">Three phases. The expensive part — embedding 10k images — happens once, offline.
-       Every search is one query embedding plus one matrix multiply.</p>
+       Every search is one query embedding plus one vector comparison, whether that comparison runs in a
+       NumPy matrix in RAM (<code>DATA_BACKEND=memory</code>) or as a query inside Postgres
+       (<code>DATA_BACKEND=sql</code>, the pgvector backend this app actually runs on in production).</p>
     <div class="arch-diagram">
       <div class="tier three">
         <div class="node data"><b>Catalog</b><small>catalog_abo.json<br/>10k product rows</small></div>
         <div class="node ml"><b>embed_image()</b><small>CLIP ViT-B-32 → 512-dim<br/>L2-normalized</small></div>
-        <div class="node infra"><b>index_clip.npz</b><small>skus + 10000×512 matrix<br/>+ model fingerprint</small></div>
+        <div class="node infra"><b>index_clip.npz OR Postgres</b><small>skus + 10000×512 vectors<br/>+ model fingerprint</small></div>
       </div>
       <div class="flow-arrow">Phase 1 · build once (offline)</div>
       <div class="tier three">
-        <div class="node app"><b>PRODUCTS</b><small>catalog rows in RAM</small></div>
-        <div class="node infra"><b>_index_matrix</b><small>10000×512 normalized</small></div>
-        <div class="node ml"><b>_centroid_matrix</b><small>13×512 category centroids</small></div>
+        <div class="node app"><b>PRODUCTS</b><small>catalog rows — in RAM (memory) or a Postgres table (sql)</small></div>
+        <div class="node infra"><b>Vectors</b><small>_index_matrix in RAM, or the products.embedding column, HNSW-indexed</small></div>
+        <div class="node ml"><b>Category centroids</b><small>13×512 — in RAM either way (cheap either way)</small></div>
       </div>
-      <div class="flow-arrow">Phase 2 · loaded at server startup</div>
+      <div class="flow-arrow">Phase 2 · loaded / connected at server startup</div>
       <div class="tier">
-        <div class="node client wide"><b>Phase 3 · a live search</b><small>user photo → embed → classify category → rank (M · q) → top-8 → hydrate → results</small></div>
+        <div class="node client wide"><b>Phase 3 · a live search</b><small>photo (or a stored product's own vector, or a room-photo tile) → embed → classify → rank → hydrate → results</small></div>
       </div>
     </div>
   </section>
@@ -91,62 +97,197 @@
           weight (<code>clip:ViT-B-32:laion2b_s34b_b79k:fusion=0.3</code>) — so a config change is detected
           and a mismatched cache is refused, not silently ranked against.</li>
     </ol>
-    <p class="arch-lead">That <code>.npz</code> <strong>is the precomputed search index</strong>. Embedding
-       10k images on CPU takes ~12 minutes — which is exactly why it's done once and cached.
-       <strong>At runtime we never re-embed the catalog.</strong></p>
+    <p class="arch-lead">That <code>.npz</code> is the precomputed search index for the <strong>memory</strong>
+       backend. For the <strong>sql</strong> backend, the same already-computed vectors are reused, not
+       recomputed — <code>products_repo_sql.init_and_seed(reuse_vectors_from="data/index_clip.npz")</code>
+       reads that file and bulk-inserts each product's fused <em>and</em> pure-image vectors into Postgres
+       in batches (1000 rows/batch — a naive per-row check was a real N+1 bug: 10k SELECT-then-write round
+       trips against a remote Cloud SQL instance took over 20 minutes; batching turns that into a handful of
+       round trips). <strong>At runtime, neither backend ever re-embeds the catalog.</strong> Embedding 10k
+       images on CPU takes ~12 minutes — exactly why it's done once and cached (or seeded) ahead of time.</p>
   </section>
 
   <!-- ============ PHASE 2 ============ -->
   <section class="arch-section">
     <h2>Phase 2 — Server startup</h2>
-    <p class="arch-lead"><code>_build_catalog_index()</code> runs on boot and puts everything in memory:</p>
-    <ol class="doc-steps">
-      <li><strong>Read config</strong> (<code>config.yaml</code>) → backend is <code>clip</code>, catalog is <code>catalog_abo.json</code>.</li>
-      <li><strong>Load the catalog</strong> → the <code>PRODUCTS</code> list (10k rows) in RAM.</li>
-      <li><strong>Load the index</strong> from <code>index_clip.npz</code>: verify the <code>fingerprint</code>
-          matches the current model (refuse a stale cache), then hold <strong>two</strong> aligned
-          <code>(10000, 512)</code> matrices with parallel SKU and category arrays —
-          <code>_index_matrix</code> (fused image+text, for <em>ranking</em>) and
-          <code>_index_image_matrix</code> (pure image, for <em>display</em>; see Phase 3).</li>
-      <li><strong>Build category centroids</strong>: average each category's vectors into one normalized
-          centroid (its “average look”), stacked into <code>_centroid_matrix</code> <code>(13, 512)</code>.</li>
-      <li><strong>CLIP loads lazily</strong> — the ~577 MB model comes into RAM on the first search (why the
-          first is ~6 s and every one after is fast).</li>
-    </ol>
+    <p class="arch-lead">What happens on boot depends entirely on <code>DATA_BACKEND</code> — everything
+       downstream (Phase 3) is written to not care which one is active.</p>
+    <div class="arch-grid">
+      <div class="arch-col">
+        <div class="arch-col-head local">
+          <h3>memory</h3>
+          <span class="arch-tag">in-RAM matrix, brute-force</span>
+        </div>
+        <div class="arch-diagram">
+          <ol class="doc-steps" style="margin:0;">
+            <li>Load <code>PRODUCTS</code> (10k rows) into RAM.</li>
+            <li>Load <code>index_clip.npz</code>, verify its fingerprint matches the current model config
+                (refuse a stale cache rather than silently rank against it), and hold two aligned
+                <code>(10000, 512)</code> matrices: <code>_index_matrix</code> (fused, for ranking) and
+                <code>_index_image_matrix</code> (pure image, for display).</li>
+            <li>Average each category's vectors into a <code>(13, 512)</code> centroid matrix.</li>
+            <li>CLIP itself loads lazily on the first search (~6s once, then fast).</li>
+          </ol>
+        </div>
+      </div>
+      <div class="arch-col">
+        <div class="arch-col-head gcp">
+          <h3>sql <span style="font-weight:400;opacity:.85;">(what's actually deployed)</span></h3>
+          <span class="arch-tag">Cloud SQL + pgvector, HNSW-indexed</span>
+        </div>
+        <div class="arch-diagram">
+          <ol class="doc-steps" style="margin:0;">
+            <li>No catalog rows or vectors load into RAM at all — <code>_load_sql_centroids()</code> runs a
+                single 13-row <code>SELECT</code> for the category centroids (precomputed at seed time) and
+                that's it.</li>
+            <li>Every product row and its two vectors (fused + pure-image) live in the
+                <code>products</code> table, with an <strong>HNSW index</strong> on the fused
+                <code>embedding</code> column (<code>vector_cosine_ops</code>).</li>
+            <li>A search never scans a Python list — it's one SQL query, index-accelerated.</li>
+          </ol>
+          <p style="font-size:12.5px;color:var(--gray-text);margin:10px 0 0;">HNSW is <em>approximate</em>:
+             its default search breadth (<code>ef_search=40</code>) was found — via a real production bug —
+             to be too narrow for this catalog size and could miss the true nearest neighbors for ambiguous
+             queries. Fixed by raising it to 200 per-query (<code>SET LOCAL</code>, scoped to one
+             transaction). See <code>GCP_SETUP.md</code> for the full story.</p>
+        </div>
+      </div>
+    </div>
   </section>
 
   <!-- ============ PHASE 3 ============ -->
   <section class="arch-section">
     <h2>Phase 3 — A live photo search</h2>
-    <p class="arch-lead">The pipeline for one uploaded photo, end to end.</p>
+    <p class="arch-lead">The core pipeline for one uploaded photo, end to end. Everything below it in this
+       section is a variation that reuses these same pieces.</p>
     <ol class="flow-strip">
       <li><span class="flow-num">1</span><b>Upload</b><span>User picks a photo; the browser POSTs it to <code>/api/visual-search</code>.</span></li>
       <li><span class="flow-num">2</span><b>Validate</b><span>Must be an image; oversized uploads get a clean 413.</span></li>
       <li><span class="flow-num">3</span><b>Offload</b><span>CPU work runs in a threadpool so the server stays responsive.</span></li>
       <li><span class="flow-num">4</span><b>Embed</b><span>Same <code>embed_image()</code> as the catalog → a normalized 512-vector <code>q</code>.</span></li>
-      <li><span class="flow-num">5</span><b>Classify</b><span>Centroids · q → predicted category + confidence (the “Detected:” chip).</span></li>
-      <li><span class="flow-num">6</span><b>Rank</b><span><code>scores = M_fused · q</code> — one matmul, best recall (validated +8pt over image-only); take the top 8.</span></li>
-      <li><span class="flow-num">7</span><b>Score for display</b><span><code>M_image[top-8] · q</code> — the SAME top-8 items' pure-image cosine, shown as the % badge instead of the fused score.</span></li>
-      <li><span class="flow-num">8</span><b>Hydrate</b><span>Batch-fetch those 8 product rows; attach the display % match.</span></li>
-      <li><span class="flow-num">9</span><b>Render</b><span>Draw the chip + 8 cards; matches below the threshold collapse behind an expander.</span></li>
+      <li><span class="flow-num">5</span><b>Classify</b><span>Centroids · q → predicted category + confidence (the "Detected:" chip).</span></li>
+      <li><span class="flow-num">6</span><b>Rank</b><span>Fused vectors · q — in-memory matmul or a pgvector query, same interface either way; fetches 48 candidates.</span></li>
+      <li><span class="flow-num">7</span><b>Score for display</b><span>Pure-image vectors · q, computed only for those 48 already-ranked items.</span></li>
+      <li><span class="flow-num">8</span><b>Hydrate</b><span>Batch-fetch those product rows; attach the display % match.</span></li>
+      <li><span class="flow-num">9</span><b>Render</b><span>Chip + up to 12 cards; the rest (and anything below the match threshold) collapse behind one expander.</span></li>
     </ol>
     <div class="doc-callout">
       <h3>Ranking vs. display: two scores, on purpose</h3>
       <p>A pure-image query naturally scores <em>lower</em> against a fused (image+text) catalog vector than
-         against a pure-image one — CLIP's image and text embeddings don't perfectly overlap (the “modality
-         gap”), and blending in 70% text pulls a catalog vector toward text-space. Showing that fused number
+         against a pure-image one — CLIP's image and text embeddings don't perfectly overlap (the "modality
+         gap"), and blending in 70% text pulls a catalog vector toward text-space. Showing that fused number
          directly made a near-perfect match read as a discouraging ~60%.</p>
-      <p>So the two jobs are split: <strong>which</strong> 8 products appear (and their order) always comes from
+      <p>So the two jobs are split: <strong>which</strong> products appear (and their order) always comes from
          the fused score — that's what the recall eval validated. <strong>What number is shown</strong> — and
-         what the match-threshold gate reacts to — is a separate pure-image cosine, computed only for those 8
-         already-chosen items (cheap: 8 dot products, not a second full ranking pass). A genuine match now
-         reads ~85–100%, same scale as before fusion existed.</p>
+         what the match-threshold gate reacts to — is a separate pure-image cosine, computed only for the
+         48 already-chosen candidates (cheap: 48 dot products, not a second full ranking pass). A genuine
+         match reads ~85–100%, same scale as before fusion existed.</p>
     </div>
-    <p class="arch-lead"><b>Why the query and catalog must share the model:</b> vectors are only comparable if they
-       come from the <em>same</em> embedding — that's why the fingerprint pin (Phase 2) matters. <b>Match %</b> on
-       each card is the pure-image <code>cosine × 100</code> for the ranked item (see the callout above) —
-       genuine matches read ~85–100%, real out-of-catalog photos ~30–54%, which the configurable threshold
-       (55%) turns into a “no strong matches” state.</p>
+    <p class="arch-lead"><b>48 fetched, 12 shown, on purpose:</b> the backend always fetches 48 candidates so
+       sorting and price-filtering (below) have real material to work with — reordering the same 8 tiles by
+       price wasn't a useful feature. The results grid shows the top 12 by default; the rest fold into the
+       same "show more matches" expander that below-threshold items already use.</p>
+  </section>
+
+  <!-- ============ REFINEMENT ============ -->
+  <section class="arch-section">
+    <h2>Text-refined queries — "but in black"</h2>
+    <p class="arch-lead">CLIP has a <em>text</em> tower as well as an image tower, in the same joint
+       512-dim space — already used to fuse catalog vectors in Phase 1. Refinement reuses it on the
+       <em>query</em> side: type "but in black" and that phrase gets embedded and blended into the query
+       vector, then the catalog is re-ranked against the blended vector.</p>
+    <div class="doc-callout">
+      <h3>Why refinement is a two-stage, pool-constrained rerank — not a fresh whole-catalog search</h3>
+      <p>The first version blended the text vector in and searched the <em>entire</em> catalog with it. That
+         broke in production: a bare color word like "black" embeds close to generic solid-color/swatch
+         imagery in CLIP's text space, and blending even 30% of it in was enough to jump a search that
+         correctly found real wall clocks onto unrelated fabric swatches instead — found via manual testing,
+         not a hypothetical.</p>
+      <p>Fixed with two stages: first rank a pool of 100 items using the <em>unblended</em> query (the normal
+         search — guarantees the pool is topically relevant), <strong>then</strong> re-rank only that pool
+         using the blended (image + 30% text) vector. A refinement can now only reorder items that were
+         already legitimate matches — it can never introduce an unrelated one. (<code>REFINE_IMAGE_WEIGHT
+         = 0.7</code>, <code>REFINE_POOL_SIZE = 100</code> — both empirically tuned, not derived; a wider
+         pool was tested and made the color-swatch failure mode come back.)</p>
+      <p>On <code>DATA_BACKEND=sql</code>, the second stage deliberately does <strong>not</strong> run a
+         second pgvector query — Postgres's planner could choose the (approximate) HNSW index for a
+         <code>WHERE sku IN (...) ORDER BY &lt;=&gt;</code> query and silently under-return results. Instead
+         the pool's ~100 vectors are fetched once and reranked in NumPy — exact, small, and identical in
+         behavior to the in-memory backend.</p>
+    </div>
+    <p class="arch-lead"><b>Category classification always uses the unblended vector</b> — a color
+       refinement shouldn't change what category the photo is classified as, only which items of that
+       category rise to the top. And refinement isn't only for an uploaded photo: <b>Find Similar</b>
+       (below) supports the identical refine flow, sourced from a stored product's vector instead of a
+       fresh upload.</p>
+  </section>
+
+  <!-- ============ PRICE INTENT ============ -->
+  <section class="arch-section">
+    <h2>Price-intent text ("cheaper", "under $50") — sort, not search</h2>
+    <div class="doc-callout">
+      <h3>Why price never goes through CLIP</h3>
+      <p>CLIP was trained on image/caption pairs — it has no grounding for a concept like "price." Verified
+         directly: sending "cheaper" through the same blend-and-rerank path as "but in black" returned
+         nearly the identical set of items, with no price trend at all. Whatever embedding "cheaper"
+         produces, it isn't one that means "less expensive."</p>
+      <p>So price-intent phrases are pattern-matched client-side (<code>_parsePriceIntent</code>) and handled
+         as a plain sort/filter over the <em>already-fetched</em> 48 results — zero network calls, and
+         always correct, because price is exact data already in hand, not something to approximate. "under
+         $50" captures the number and applies it as a real filter; a compound query like "cheaper black one"
+         splits the price phrase out, applies it as a sort, and still sends the leftover "black" through as
+         a genuine CLIP refinement — both mechanisms fire, each doing only the job it's actually good at.</p>
+    </div>
+  </section>
+
+  <!-- ============ FIND SIMILAR ============ -->
+  <section class="arch-section">
+    <h2>Find Similar — query FROM the catalog, not a fresh upload</h2>
+    <p class="arch-lead">Every product already has a stored vector — its own catalog image was embedded in
+       Phase 1. "Find similar" on any product card or product page reuses that stored vector as the query,
+       with <strong>no re-embedding call</strong>: <code>GET /api/products/{sku}/similar</code> fetches that
+       product's pure-image vector and runs it through the identical rank/refine machinery a photo upload
+       uses. This is also why enabling text refinement here ("find similar, but in black") was a small
+       change, not a new feature — the refinement code never cared where the query vector came from.</p>
+  </section>
+
+  <!-- ============ SHOP THE ROOM ============ -->
+  <section class="arch-section">
+    <h2>Shop the Room — one photo, one match per item</h2>
+    <p class="arch-lead">Every other search here has the same output shape: photo in, a ranked pile of
+       similar things out. Shop the Room changes that shape: upload a photo of a room and get back
+       <strong>one best-matching product per distinct furnishing detected</strong> — the sofa, the rug, the
+       lamp, the wall art — with a running total and one "Add all to cart" button, instead of eight
+       near-duplicates of whichever object was most visually prominent.</p>
+    <ol class="doc-steps">
+      <li>The photo is split into a small tile grid — the whole image plus a 2×2 crop (5 tiles total, kept
+          intentionally small: on the SQL backend each tile costs one network round trip, and a wider 3×3
+          sweep measured ~30s cross-region in testing versus ~1-3s same-region).</li>
+      <li>Each tile is embedded and classified independently, then ranked within its predicted category —
+          the exact same <code>embed_image → classify → rank</code> pipeline as a normal search, called once
+          per tile.</li>
+      <li>Unlike a normal search, a tile's classification does <em>not</em> need to clear the usual
+          confidence threshold — that threshold is calibrated for "should we auto-scope a whole clean
+          photo," and a small cropped tile is inherently less certain even when its guess is right (verified:
+          a lamp tile classified at only 36% confidence still found the exact correct lamp at 77% match).
+          What <em>does</em> gate a tile is whether its top product match clears the normal match threshold —
+          a blank wall or floor tile just won't find anything above that bar and is silently skipped.</li>
+      <li>If two tiles land on the same category, only the higher-scoring one survives. Results are capped
+          at 6 distinct categories, sorted by score.</li>
+    </ol>
+  </section>
+
+  <!-- ============ CROP TO SEARCH ============ -->
+  <section class="arch-section">
+    <h2>Crop-to-search — the multi-object problem, without a new model</h2>
+    <p class="arch-lead">A photo with more than one object (a room shot with a sofa <em>and</em> a lamp)
+       embeds as an arbitrary blend of everything in frame. Crop-to-search lets the user drag a box over
+       their uploaded photo; the selection is cropped client-side on a <code>&lt;canvas&gt;</code> —
+       correctly mapping through the image's <code>object-fit:contain</code> letterboxing rather than
+       assuming a 1:1 pixel mapping — and the crop is re-submitted through the exact same
+       <code>/api/visual-search</code> endpoint as a normal upload. No detector model, no new
+       infrastructure: it produces a new "photo" and lets the existing pipeline do the rest. Pointer Events
+       (not raw mouse events) drive the drag, so this works with touch on a tablet as well as a mouse.</p>
   </section>
 
   <!-- ============ RECAP ============ -->
@@ -157,28 +298,30 @@
         <thead><tr><th>Stage</th><th>What happens</th></tr></thead>
         <tbody>
           <tr><td>Catalog</td><td>A JSON list of product rows + image files on disk.</td></tr>
-          <tr><td>Offline</td><td>Embed every catalog image once (CLIP → normalized 512-vectors) → <code>index_clip.npz</code>.</td></tr>
-          <tr><td>Startup</td><td>Load catalog + index matrix + category centroids into RAM; CLIP model lazy.</td></tr>
-          <tr><td>Query</td><td>Embed the photo with the same model → classify → matmul against the index → top-8 → look up products → return.</td></tr>
+          <tr><td>Offline</td><td>Embed every catalog image once (CLIP → normalized 512-vectors) → <code>index_clip.npz</code>, or seed Postgres from those same vectors.</td></tr>
+          <tr><td>Startup</td><td><code>memory</code>: load catalog + index + centroids into RAM. <code>sql</code>: load only the 13 centroids; vectors stay in Postgres, HNSW-indexed.</td></tr>
+          <tr><td>Query</td><td>Embed the photo (or reuse a stored product's vector, or a room-photo tile) → classify → rank 48 candidates → look up products → return.</td></tr>
+          <tr><td>Refine</td><td>Blend in a CLIP text embedding, reranking only a pool of already-relevant candidates — never a fresh whole-catalog search.</td></tr>
+          <tr><td>Price intent</td><td>Sorted/filtered client-side over the already-fetched results — never sent through CLIP.</td></tr>
         </tbody>
       </table>
     </div>
   </section>
 
   <!-- ============ GCP MAP ============ -->
-  <section class="arch-section">
+  <section class="arch-section" style="border-bottom:none;">
     <h2>Where this maps to GCP</h2>
-    <p class="arch-lead">The shape is identical; only the providers change. See the
-       <a href="/architecture.html">Architecture</a> page for the full on-prem vs GCP diagram.</p>
+    <p class="arch-lead">See the <a href="/architecture.html">Architecture</a> page for the full diagram and
+       <a href="/pitch.html">Project Overview</a> for the business framing. The short version:</p>
     <div class="table-scroll">
       <table class="arch-table">
-        <thead><tr><th>Local (this repo)</th><th>GCP production</th></tr></thead>
+        <thead><tr><th>Concern</th><th>Status</th><th>Detail</th></tr></thead>
         <tbody>
-          <tr><td><code>embed_image()</code> — local CLIP</td><td>Vertex AI Multimodal Embeddings (or CLIP on Cloud Run)</td></tr>
-          <tr><td>brute-force <code>M · q</code></td><td>same at 10k–50k; pgvector / Vertex Vector Search only at ≫100k</td></tr>
-          <tr><td><code>catalog_abo.json</code> in RAM</td><td>Cloud SQL (Postgres)</td></tr>
-          <tr><td><code>static/images/</code> on disk</td><td>Cloud Storage + Cloud CDN</td></tr>
-          <tr><td><code>build_index.py</code> offline</td><td>a Cloud Run Job writing the index artifact to GCS</td></tr>
+          <tr><td><code>DATA_BACKEND=sql</code> — Cloud SQL + pgvector</td><td>✅ Live</td><td>This is what's actually deployed on Cloud Run today, not a future plan.</td></tr>
+          <tr><td><code>EMBEDDING_BACKEND=clip</code> — local CLIP in the container</td><td>✅ Live</td><td>The model ships bundled in the image (~577MB) — no per-call network hop, no external API cost.</td></tr>
+          <tr><td><code>EMBEDDING_BACKEND=vertex</code> — Vertex AI Multimodal Embeddings</td><td>🔜 Not yet tested</td><td>The code path exists (same interface, swap one config value) but has never been benchmarked in production against local CLIP. Planned comparison: latency/cost tradeoff of an API call per query vs. a bundled model.</td></tr>
+          <tr><td>Product images from Cloud Storage + Cloud CDN</td><td>🔜 Not yet done</td><td>Currently served from the container's own filesystem — the single highest-payoff infra change identified but not yet built.</td></tr>
+          <tr><td>Vertex AI Vector Search</td><td>❌ Not planned at this scale</td><td>Would need an always-on index endpoint (real hourly cost) and take 30-60min to build an index — worse than pgvector for a ~10k-row catalog. Revisit past ~10M vectors.</td></tr>
         </tbody>
       </table>
     </div>

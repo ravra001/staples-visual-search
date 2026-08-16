@@ -15,9 +15,10 @@
   <header class="arch-hero">
     <span class="hero-eyebrow">System Design</span>
     <h1>Visual Search — Architecture</h1>
-    <p>How the "search by photo" feature is built today (runs fully on a laptop, zero cloud)
-       and how the exact same code maps onto Google Cloud for production. Every box in the
-       local diagram has a one-to-one swap on the GCP side.</p>
+    <p>This app runs two ways: fully offline on a laptop (<code>DATA_BACKEND=memory</code>), or on Google
+       Cloud — Cloud Run + Cloud SQL/pgvector — which is how it's <strong>actually deployed today</strong>,
+       not a future plan. The one piece genuinely still ahead: swapping local CLIP for Vertex AI Multimodal
+       Embeddings has never been tested or benchmarked in production (see the callout below).</p>
     <div class="arch-legend">
       <span><span class="dot dot-client"></span> Client</span>
       <span><span class="dot dot-app"></span> Application</span>
@@ -30,15 +31,17 @@
   <!-- ============ REQUEST FLOW ============ -->
   <section class="arch-section">
     <h2>Request flow — one photo search</h2>
-    <p class="arch-lead">The pipeline is identical in both environments; only the
-       <em>providers</em> behind the embed / classify / rank steps change.</p>
+    <p class="arch-lead">The pipeline is identical in both environments; only the <em>providers</em> behind
+       the embed / rank steps change. Text refinement, Find Similar, and Shop the Room all extend this same
+       flow rather than introducing separate ones — see
+       <a href="/how-it-works.html">How It Works</a> for how each one reuses these steps.</p>
     <ol class="flow-strip">
       <li><span class="flow-num">1</span><b>Upload</b><span>User picks a photo; the browser POSTs it to <code>/api/visual-search</code> (validated + size-capped).</span></li>
-      <li><span class="flow-num">2</span><b>Embed</b><span>Image → normalized vector (heuristic, local CLIP, or Vertex AI). Runs in a threadpool.</span></li>
-      <li><span class="flow-num">3</span><b>Classify</b><span>Nearest-centroid → predicted category + confidence (the “Detected:” chip).</span></li>
-      <li><span class="flow-num">4</span><b>Rank</b><span>Vectorized cosine (<code>M · q</code>) vs the pre-embedded index; scoped to the category when confident. Top-K.</span></li>
+      <li><span class="flow-num">2</span><b>Embed</b><span>Image → normalized vector (local CLIP today; Vertex AI is a coded, untested alternative). Runs in a threadpool.</span></li>
+      <li><span class="flow-num">3</span><b>Classify</b><span>Nearest-centroid → predicted category + confidence (the "Detected:" chip).</span></li>
+      <li><span class="flow-num">4</span><b>Rank</b><span>Vector comparison (in-memory matmul, or a pgvector query) vs the catalog; scoped to the category when confident. Top 48.</span></li>
       <li><span class="flow-num">5</span><b>Hydrate</b><span>Batch-fetch product rows for the winning SKUs; attach the % match.</span></li>
-      <li><span class="flow-num">6</span><b>Render</b><span>Chip + product cards; weak (below-threshold) matches collapse, or a “no strong matches” state.</span></li>
+      <li><span class="flow-num">6</span><b>Render</b><span>Chip + up to 12 cards; weak/overflow matches collapse, or a "no strong matches" state.</span></li>
     </ol>
   </section>
 
@@ -51,21 +54,21 @@
       <div class="arch-col">
         <div class="arch-col-head local">
           <h3>On-Prem / Local</h3>
-          <span class="arch-tag">Current · zero cloud · runs on a laptop</span>
+          <span class="arch-tag">Dev/offline mode · zero cloud · runs on a laptop</span>
         </div>
         <div class="arch-diagram">
           <div class="tier">
-            <div class="node client"><b>Browser</b><small>index / category / product / visual-search / architecture / how-it-works .html · vanilla JS, no build step</small></div>
+            <div class="node client"><b>Browser</b><small>index / category / product / cart / visual-search / shop-the-room .html · vanilla JS, no build step</small></div>
           </div>
           <div class="flow-arrow">HTTP · localhost:8000</div>
           <div class="tier">
-            <div class="node app wide"><b>FastAPI + Uvicorn</b><small>single process — serves static frontend <em>and</em> JSON API<br/>/api/products · /api/search · /api/visual-search · /api/config</small></div>
+            <div class="node app wide"><b>FastAPI + Uvicorn</b><small>single process — serves static frontend <em>and</em> JSON API<br/>/api/products · /api/search · /api/visual-search · /api/products/{sku}/similar · /api/shop-the-room</small></div>
           </div>
           <div class="flow-arrow">in-process calls</div>
           <div class="tier three">
-            <div class="node ml"><b>Embedding</b><small>config.yaml embedding.backend<br/>= heuristic (NumPy/PIL)<br/>or clip (local OpenCLIP, bundled offline)</small></div>
+            <div class="node ml"><b>Embedding</b><small>config.yaml embedding.backend<br/>= clip (local OpenCLIP, bundled offline)</small></div>
             <div class="node data"><b>Catalog</b><small>data.backend = memory<br/>Python list from<br/>catalog_abo.json</small></div>
-            <div class="node data"><b>Images</b><small>local filesystem<br/>static/images/products/<br/>&lt;SKU&gt;.jpg (10k) · .png (demo)</small></div>
+            <div class="node data"><b>Images</b><small>local filesystem<br/>static/images/products/<br/>&lt;SKU&gt;.jpg (10k)</small></div>
           </div>
           <div class="tier">
             <div class="node infra wide"><b>Catalog index</b><small>precomputed offline (build_index.py) → index_clip.npz (fingerprinted) → loaded &amp; normalized at startup · vectorized cosine <code>M · q</code> + nearest-centroid classifier</small></div>
@@ -77,7 +80,7 @@
       <div class="arch-col">
         <div class="arch-col-head gcp">
           <h3>Google Cloud</h3>
-          <span class="arch-tag">Target · same code · flip env vars + creds</span>
+          <span class="arch-tag">Live today — Cloud Run URL, real Cloud SQL</span>
         </div>
         <div class="arch-diagram">
           <div class="tier">
@@ -85,20 +88,20 @@
           </div>
           <div class="flow-arrow">HTTPS</div>
           <div class="tier">
-            <div class="node infra wide"><b>Cloud Load Balancing + Cloud CDN</b><small>TLS, global edge, caches product images &amp; static assets</small></div>
+            <div class="node infra wide"><b>Cloud Run's own HTTPS endpoint</b><small>TLS terminated by Cloud Run — no separate load balancer provisioned for the demo. Cloud CDN in front of product images is planned, not yet wired up (images are still served from the container).</small></div>
           </div>
           <div class="flow-arrow">routed request</div>
           <div class="tier">
-            <div class="node app wide"><b>Cloud Run</b><small>FastAPI in a container · autoscaling · stateless<br/>(image from Artifact Registry, built by Cloud Build)</small></div>
+            <div class="node app wide"><b>Cloud Run</b><small>FastAPI in a container · min-instances=1, concurrency=20 (tuned to avoid cold-start failures and CPU starvation between concurrent CLIP inference calls)<br/>image from Artifact Registry, built by Cloud Build</small></div>
           </div>
           <div class="flow-arrow">service calls</div>
           <div class="tier three">
-            <div class="node ml"><b>Vertex AI</b><small>Multimodal Embeddings<br/>multimodalembedding@001<br/>→ 1408-dim vector</small></div>
-            <div class="node data"><b>Cloud SQL + pgvector</b><small>products table:<br/>row + embedding + model_version</small></div>
-            <div class="node data"><b>Cloud Storage</b><small>product images bucket<br/>served via Cloud CDN</small></div>
+            <div class="node ml"><b>Local CLIP</b><small>bundled in the container image<br/>(577MB) — no per-query network hop<br/><em>Vertex AI: coded, not yet swapped in</em></small></div>
+            <div class="node data"><b>Cloud SQL + pgvector</b><small>products table:<br/>row + embedding + image_embedding<br/>+ model_version, HNSW-indexed</small></div>
+            <div class="node data"><b>Container filesystem</b><small>product images bundled in the image<br/><em>GCS + Cloud CDN: planned, not yet built</em></small></div>
           </div>
           <div class="tier">
-            <div class="node infra wide"><b>Catalog index</b><small>pgvector similarity <em>in the database</em> (<code>embedding &lt;=&gt; q</code>, category-filtered) — no separate index file; graduate to Vertex Vector Search only at ≫100k</small></div>
+            <div class="node infra wide"><b>Catalog index</b><small>pgvector similarity <em>in the database</em> (<code>embedding &lt;=&gt; q</code>, category-filtered, <code>ef_search=200</code>) — no separate index file</small></div>
           </div>
         </div>
       </div>
@@ -106,20 +109,37 @@
     </div>
   </section>
 
+  <!-- ============ VERTEX AI CALLOUT ============ -->
+  <section class="arch-section">
+    <div class="doc-callout">
+      <h3>What's genuinely not done yet: Vertex AI Multimodal Embeddings</h3>
+      <p><code>embeddings.py</code> already has a working <code>vertex</code> backend (same interface as
+         local CLIP — swap one config value, <code>embedding.backend: vertex</code>) that calls Vertex AI's
+         <code>multimodalembedding@001</code> and produces a 1408-dim vector instead of CLIP's 512-dim one.
+         The rest of the pipeline is dimension-agnostic, so this genuinely is a config flip, not a rewrite.</p>
+      <p>What hasn't happened: it's never been run against production traffic, benchmarked for latency, or
+         compared for embedding quality against local CLIP. The real tradeoff to measure before switching —
+         an API call per query (network latency, per-call cost, but no 577MB model in the image and a much
+         faster cold start) versus a bundled model (larger image, slower cold start, but zero per-query
+         network dependency and zero marginal cost) — is a <strong>planned comparison, not a completed
+         migration</strong>. Don't read the "coded" status above as "evaluated."</p>
+    </div>
+  </section>
+
   <!-- ============ GCP PRODUCTION PIPELINE ============ -->
   <section class="arch-section">
     <h2>GCP production pipeline (pgvector target)</h2>
-    <p class="arch-lead">The fuller production design. The catalog and its vectors live together in
-       <strong>Cloud SQL + pgvector</strong>, embedded by <strong>Vertex AI</strong> and kept fresh by a
-       standalone pipeline. Similarity is computed <em>in the database</em>; query embeddings are logged
-       <em>asynchronously</em> for relevance tuning — never on the critical path.</p>
+    <p class="arch-lead">The fuller production design. <strong>The left column (indexing pipeline) is not
+       yet built</strong> — today's seeding is a manual <code>init_and_seed()</code> run, not an
+       event-driven pipeline. The right column (serving) reflects the shape of what's live, simplified —
+       there is no Pub/Sub, BigQuery, or async logging in the current deployment.</p>
     <div class="arch-grid">
 
       <!-- INDEXING PIPELINE -->
       <div class="arch-col">
         <div class="arch-col-head gcp">
           <h3>Indexing pipeline</h3>
-          <span class="arch-tag">one-time backfill + continuous</span>
+          <span class="arch-tag">🔜 not yet built — design only</span>
         </div>
         <div class="arch-diagram">
           <div class="tier">
@@ -127,7 +147,7 @@
           </div>
           <div class="flow-arrow">event</div>
           <div class="tier">
-            <div class="node infra wide"><b>Pub/Sub</b><small>“product upserted” / “object finalized” — decouples ingestion from serving</small></div>
+            <div class="node infra wide"><b>Pub/Sub</b><small>"product upserted" / "object finalized" — decouples ingestion from serving</small></div>
           </div>
           <div class="flow-arrow">triggers</div>
           <div class="tier">
@@ -135,7 +155,7 @@
           </div>
           <div class="flow-arrow">calls</div>
           <div class="tier">
-            <div class="node ml wide"><b>Vertex AI Multimodal Embeddings</b><small>image → 1408-dim vector</small></div>
+            <div class="node ml wide"><b>Embedding model</b><small>local CLIP or Vertex AI, per the callout above</small></div>
           </div>
           <div class="flow-arrow">UPSERT</div>
           <div class="tier">
@@ -148,40 +168,88 @@
       <div class="arch-col">
         <div class="arch-col-head gcp">
           <h3>Serving — per search</h3>
-          <span class="arch-tag">synchronous · comparison in the DB</span>
+          <span class="arch-tag">✅ this shape is live · simplified here</span>
         </div>
         <div class="arch-diagram">
           <div class="tier">
             <div class="node client wide"><b>Browser</b><small>uploads a photo</small></div>
           </div>
-          <div class="flow-arrow">HTTPS · Cloud LB + CDN</div>
+          <div class="flow-arrow">HTTPS · Cloud Run</div>
           <div class="tier">
-            <div class="node app wide"><b>Cloud Run — FastAPI</b><small>validates + offloads the embed call</small></div>
+            <div class="node app wide"><b>Cloud Run — FastAPI</b><small>validates + offloads the embed call to a threadpool</small></div>
           </div>
           <div class="flow-arrow">embed query</div>
           <div class="tier">
-            <div class="node ml wide"><b>Vertex AI</b><small>uploaded image → query vector <code>q</code></small></div>
+            <div class="node ml wide"><b>Local CLIP (in-container)</b><small>uploaded image → query vector <code>q</code></small></div>
           </div>
           <div class="flow-arrow">similarity query</div>
           <div class="tier">
-            <div class="node data wide"><b>Cloud SQL + pgvector</b><small><code>ORDER BY embedding &lt;=&gt; q [WHERE category=…] LIMIT k</code> — rank + hydrate in one query</small></div>
+            <div class="node data wide"><b>Cloud SQL + pgvector</b><small><code>ORDER BY embedding &lt;=&gt; q [WHERE category=…] LIMIT 48</code> — rank + hydrate in one query</small></div>
           </div>
           <div class="flow-arrow">ranked rows + match %</div>
           <div class="tier">
-            <div class="node client wide"><b>Results</b><small>threshold applied · weak matches collapsed</small></div>
-          </div>
-          <div class="flow-arrow">async (off critical path)</div>
-          <div class="tier">
-            <div class="node infra wide"><b>BigQuery / analytics table</b><small>log query vector + results + clicks → relevance tuning &amp; personalization</small></div>
+            <div class="node client wide"><b>Results</b><small>threshold applied · top 12 shown, rest collapsed</small></div>
           </div>
         </div>
       </div>
 
     </div>
-    <p class="arch-lead" style="margin-top:22px;">Our recent work carries over natively: the
-       <strong>category classifier</strong> becomes a <code>WHERE category = …</code> filter on the vector
-       query, and the <strong>match threshold</strong> becomes a distance cutoff — so scoping and the
-       “no strong matches” state need no re-architecting.</p>
+    <p class="arch-lead" style="margin-top:22px;">The category classifier becomes a
+       <code>WHERE category = …</code> filter on the vector query, and the match threshold becomes a
+       distance cutoff — scoping and the "no strong matches" state needed no re-architecting to move from
+       an in-memory matrix to Postgres. That's the actual payoff of the interface being the same on both
+       sides, not a hypothetical one — it's what made this deployment possible without rewriting
+       <code>main.py</code>.</p>
+  </section>
+
+  <!-- ============ LESSONS FROM A REAL DEPLOYMENT ============ -->
+  <section class="arch-section">
+    <h2>Lessons from a real deployment</h2>
+    <p class="arch-lead">Deploying this for real surfaced bugs that only live infrastructure could have —
+       every one of these is documented with its root cause and fix in
+       <a href="/GCP_SETUP.md">GCP_SETUP.md</a>, written as a reusable runbook, not just a changelog.</p>
+    <div class="note-cards">
+      <div class="note-card">
+        <h4>HNSW recall miss</h4>
+        <p>pgvector's default search breadth (<code>ef_search=40</code>) was too narrow for this catalog
+           size and missed the true nearest neighbors on ambiguous queries. Found by comparing exact
+           in-memory search against pgvector for the same photo, fixed with a per-query
+           <code>SET LOCAL hnsw.ef_search = 200</code>.</p>
+      </div>
+      <div class="note-card">
+        <h4>N+1 seeding</h4>
+        <p>A per-row existence check before insert is fine on localhost but is a separate network round
+           trip per row against remote Cloud SQL — 10k rows took over 20 minutes before a single row
+           committed. Fixed with a bulk SKU fetch + batched insert/update (1000 rows/batch): 9,967 rows in
+           143 seconds.</p>
+      </div>
+      <div class="note-card">
+        <h4>torch/torchvision mismatch</h4>
+        <p>Installing torch from the CPU-only index but letting torchvision resolve from default PyPI
+           pulled a CUDA build that didn't match — broke CLIP preprocessing in the deployed container with
+           <code>operator torchvision::nms does not exist</code>. Fixed by installing both from the same
+           index in one command.</p>
+      </div>
+      <div class="note-card">
+        <h4>Cold starts &amp; CPU starvation</h4>
+        <p>No minimum instance count meant every quiet-period request ate a ~25s cold start loading
+           torch+CLIP; default concurrency (80) let several CLIP calls starve each other for CPU on 2
+           vCPUs. Fixed with <code>--min-instances=1</code> and <code>--concurrency=20</code>.</p>
+      </div>
+      <div class="note-card">
+        <h4>Unindexed full-table listing</h4>
+        <p><code>/api/products</code> and <code>/api/categories</code> originally fetched the entire
+           10k-row table (every column) just to slice one page or extract 13 distinct values in Python —
+           8s and 5.3s respectively. Pushing pagination and <code>DISTINCT</code> down to SQL cut both to
+           sub-200ms.</p>
+      </div>
+      <div class="note-card">
+        <h4>Local <code>gcloud</code> auth: a dead end</h4>
+        <p>This network's TLS-intercepting proxy issues a root CA that OpenSSL 3.x strictly rejects — no
+           client-side config fixes it. Cloud Shell (browser-based, already authenticated) is the reliable
+           path for this environment; documented so it isn't re-discovered the hard way twice.</p>
+      </div>
+    </div>
   </section>
 
   <!-- ============ SWAP MAP ============ -->
@@ -192,15 +260,15 @@
        byte-for-byte identical across both columns.</p>
     <div class="table-scroll">
       <table class="arch-table">
-        <thead><tr><th>Concern</th><th>On-Prem / Local</th><th>Google Cloud</th><th>Controlled by</th></tr></thead>
+        <thead><tr><th>Concern</th><th>On-Prem / Local</th><th>Google Cloud (today)</th><th>Controlled by</th></tr></thead>
         <tbody>
-          <tr><td>Compute</td><td>Uvicorn process</td><td>Cloud Run (container, autoscaled)</td><td>deploy target</td></tr>
-          <tr><td>Embedding model</td><td>heuristic · local CLIP</td><td>Vertex AI Multimodal Embeddings</td><td><code>embedding.backend</code></td></tr>
-          <tr><td>Product catalog</td><td>in-memory Python list</td><td>Cloud SQL + pgvector (row + vector)</td><td><code>data.backend</code> + <code>database_url</code></td></tr>
-          <tr><td>Product images</td><td>local filesystem</td><td>Cloud Storage + Cloud CDN</td><td>static mount → bucket</td></tr>
-          <tr><td>Vector ranking</td><td>vectorized cosine (in-memory matrix)</td><td>pgvector similarity (SQL) → Vertex Vector Search at ≫100k</td><td>catalog size</td></tr>
-          <tr><td>Index freshness</td><td>rebuild <code>index_*.npz</code></td><td>standalone embed pipeline upserts on change</td><td>ingestion</td></tr>
-          <tr><td>Secrets / config</td><td><code>config.yaml</code> + env</td><td><code>config.yaml</code> + Secret Manager</td><td>runtime env</td></tr>
+          <tr><td>Compute</td><td>Uvicorn process</td><td>Cloud Run (container, autoscaled, min-instances=1)</td><td>deploy target</td></tr>
+          <tr><td>Embedding model</td><td>local CLIP</td><td>local CLIP (bundled in the image) — Vertex AI coded but untested</td><td><code>embedding.backend</code></td></tr>
+          <tr><td>Product catalog</td><td>in-memory Python list</td><td>Cloud SQL + pgvector (row + vector, HNSW-indexed)</td><td><code>data.backend</code> + <code>database_url</code></td></tr>
+          <tr><td>Product images</td><td>local filesystem</td><td>container filesystem — GCS + Cloud CDN planned, not built</td><td>static mount</td></tr>
+          <tr><td>Vector ranking</td><td>vectorized cosine (in-memory matrix)</td><td>pgvector similarity (SQL) — right choice at 10k rows, not a stopgap; Vertex Vector Search only worth it past ~10M vectors</td><td>catalog size</td></tr>
+          <tr><td>Index freshness</td><td>rebuild <code>index_*.npz</code></td><td>manual <code>init_and_seed()</code> run — event-driven pipeline not yet built</td><td>ingestion</td></tr>
+          <tr><td>Secrets / config</td><td><code>config.yaml</code> + env</td><td><code>config.yaml</code> + Secret Manager (DB URL)</td><td>runtime env</td></tr>
           <tr><td>CI / build</td><td>local <code>uv</code> / <code>pip</code></td><td>Cloud Build → Artifact Registry</td><td>pipeline</td></tr>
         </tbody>
       </table>
@@ -208,26 +276,25 @@
   </section>
 
   <!-- ============ SCALE NOTES ============ -->
-  <section class="arch-section">
+  <section class="arch-section" style="border-bottom:none;">
     <h2>Notes on scale</h2>
     <div class="note-cards">
       <div class="note-card">
         <h4>Precomputed index</h4>
-        <p>Catalog embeddings are computed once and cached, not on every request. At tens of
-           thousands of SKUs this becomes a one-time offline build step (cache vectors to disk /
-           a table), so server startup stays instant.</p>
+        <p>Catalog embeddings are computed once and cached (or seeded), not on every request. At tens of
+           thousands of SKUs this stays a one-time offline build/seed step, so server startup stays fast.</p>
       </div>
       <div class="note-card">
-        <h4>Brute-force is fine — until it isn't</h4>
-        <p>Cosine over an in-memory matrix is sub-millisecond for thousands of SKUs. Only when the
-           catalog reaches large scale do you graduate to Vertex AI Vector Search / Matching Engine —
-           the ranking interface doesn't change.</p>
+        <h4>pgvector is correct here, not a compromise</h4>
+        <p>At ~10k×512, an exact scan is already fast — HNSW's approximation cost (the recall bug above)
+           was a real tradeoff, not a free win. Vertex AI Vector Search would add an always-on index
+           endpoint (real hourly cost) and 30-60min index builds for no benefit at this scale. Revisit past
+           roughly 10M vectors or when sub-10ms p99 at high QPS is a hard requirement.</p>
       </div>
       <div class="note-card">
         <h4>Dimension-agnostic</h4>
-        <p>59-dim heuristic, 512-dim CLIP, or 1408-dim Vertex vectors all flow through the same
-           vectorized <code>_rank()</code> (one <code>M · q</code> matmul) — swapping the model
-           changes nothing downstream, only the fingerprint on the cached index.</p>
+        <p>512-dim CLIP or 1408-dim Vertex vectors both flow through the same ranking interface —
+           swapping the model changes nothing downstream, only the fingerprint on the cached/seeded index.</p>
       </div>
     </div>
   </section>

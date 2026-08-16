@@ -740,34 +740,24 @@ async def visual_search(request: Request, file: UploadFile = File(...),
     }
 
 
-# ---------- experimental: 3-way method comparison (baseline vs multiview vs fusion) ----------
-# Entirely optional — only registered if the experimental data exists (it's
-# gitignored/regenerable, see backend/experimental/). Never touches production
-# ranking; a missing dependency here can't affect the main app.
-try:
-    from experimental import compare_search
-    if compare_search.READY:
-        @app.post("/api/experimental/compare-search")
-        async def experimental_compare_search(file: UploadFile = File(...), top_k: int = 8):
-            if not file.content_type or not file.content_type.startswith("image/"):
-                raise HTTPException(400, "Please upload an image file")
-            top_k = max(1, min(int(top_k), 50))
-            image_bytes = await file.read(_MAX_UPLOAD_BYTES + 1)
-            if not image_bytes or len(image_bytes) > _MAX_UPLOAD_BYTES:
-                raise HTTPException(400, "Invalid or oversized image")
-            try:
-                return await run_in_threadpool(compare_search.compare, image_bytes, top_k)
-            except compare_search.CompareUnavailable as e:
-                raise HTTPException(409, str(e))   # stale/mismatched experimental data — clear reason, not a 500
-        print("[startup] experimental compare-search endpoint registered (/api/experimental/compare-search)")
-except Exception as e:
-    print(f"[startup] experimental compare-search not available ({e}) — skipping, production unaffected")
-
-
 # ---------- static assets ----------
 
 app.mount("/images", StaticFiles(directory=os.path.join(BASE_DIR, "static", "images")), name="images")
 app.mount("/assets", StaticFiles(directory=os.path.join(FRONTEND_DIR, "assets")), name="assets")
+
+# Repo-root docs (GCP_SETUP.md etc.) linked from the architecture/how-it-works
+# pages. Explicit allowlist rather than an open directory mount — this is a
+# doc-serving convenience, not a general file server.
+ROOT_DIR = os.path.dirname(BASE_DIR)
+_ROOT_DOCS = {"README.md", "GCP_SETUP.md", "HOW_IT_WORKS.md", "RUN_10K.md"}
+
+
+@app.get("/{doc_name}.md")
+def root_doc(doc_name: str):
+    fname = f"{doc_name}.md"
+    if fname not in _ROOT_DOCS:
+        raise HTTPException(404)
+    return FileResponse(os.path.join(ROOT_DIR, fname), media_type="text/plain; charset=utf-8")
 
 
 @app.get("/")
