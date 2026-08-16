@@ -378,6 +378,47 @@ All of these should return in well under a second once the instance is warm
 
 ---
 
+## 12. Continuous deployment via GitHub
+
+Once the repo has a GitHub remote, replace the manual "rebuild in Cloud Shell
+every time" loop above with a Cloud Build trigger: push to `main`, and Cloud
+Build builds + deploys automatically. The repo's `cloudbuild.yaml` defines
+the build; you only need to connect it once.
+
+**IAM — let Cloud Build actually deploy** (Cloud Build's own service account
+needs rights to call the Cloud Run API and to act as the runtime service
+account):
+
+```bash
+export PROJECT_NUMBER=$(gcloud projects describe "$PROJECT_ID" --format='value(projectNumber)')
+export CLOUDBUILD_SA="${PROJECT_NUMBER}@cloudbuild.gserviceaccount.com"
+
+gcloud projects add-iam-policy-binding "$PROJECT_ID" \
+  --member="serviceAccount:${CLOUDBUILD_SA}" \
+  --role="roles/run.admin"
+
+export RUNTIME_SA=$(gcloud run services describe "$SERVICE_NAME" --region "$REGION" --format='value(spec.template.spec.serviceAccountName)')
+gcloud iam service-accounts add-iam-policy-binding "$RUNTIME_SA" \
+  --member="serviceAccount:${CLOUDBUILD_SA}" \
+  --role="roles/iam.serviceAccountUser"
+
+# Also needs read access to the GCS-staged model (see the gotcha below)
+gsutil iam ch "serviceAccount:${CLOUDBUILD_SA}:objectViewer" \
+  "gs://${PROJECT_ID}-deploy-src"
+```
+
+**Connect the repo** (Cloud Console → Cloud Build → Triggers → Connect
+Repository → GitHub → authorize → select the repo). This step is inherently
+a browser OAuth flow; there's no clean CLI-only path for the initial
+connection.
+
+**Create the trigger**: event = push to branch `^main$`, configuration =
+"Cloud Build configuration file", location = `/cloudbuild.yaml`.
+
+From then on, `git push origin main` is the entire deploy process.
+
+---
+
 ## Troubleshooting
 
 Every one of these actually happened during this project's deployment.
@@ -400,6 +441,51 @@ core/custom_ca_certs_file` at a freshly exported CA bundle does **not** fix
 it. There is no known client-side workaround. Use Cloud Shell (browser-based,
 already authenticated, no local TLS involved) for all `gcloud`
 build/deploy/auth work instead.
+
+**`git`/GitHub over HTTPS hits a similar-looking error, but it IS fixable**
+(`SSL certificate problem: unable to get local issuer certificate`) — switch
+git's SSL backend from OpenSSL to Windows' native schannel, which validates
+against the OS cert store instead of git's own bundled CA bundle:
+
+```bash
+git config http.sslBackend schannel
+```
+
+Don't assume git is blocked the same way `gcloud` is — it's a different
+failure mode with a real local fix.
+
+### Missing bundled model after switching to a GitHub-triggered build
+
+```
+Failed. Details: The user-provided container failed to start and listen on
+the port defined provided by the PORT=8080 environment variable within the
+allocated timeout.
+```
+
+`backend/models/` (the ~577MB bundled CLIP model) is `.gitignore`'d — it
+exceeds GitHub's 100MB file limit. Earlier manual deploys packaged it from
+local disk into a tarball that bypassed git entirely, so this never came up.
+The moment the build source switches to a GitHub checkout (a CI trigger),
+the model is simply absent from the image, and the app falls back to
+downloading it from HuggingFace at cold start — slow enough (and dependent
+enough on outbound network access from the build/runtime environment) to
+blow past Cloud Run's startup health-check timeout, which surfaces as this
+generic "failed to start and listen on port" error with no obvious link to
+a missing model file.
+
+Fix: stage the model in GCS once (console.cloud.google.com/storage — a
+browser upload sidesteps local `gcloud`/`gsutil` auth entirely, which is
+useful given the TLS issue above), then add a step to `cloudbuild.yaml` that
+rsyncs it into the build context before `docker build` runs:
+
+```yaml
+- name: 'gcr.io/cloud-builders/gsutil'
+  args: ['-m', 'rsync', '-r', 'gs://BUCKET/model-cache/hf', 'backend/models/hf']
+```
+
+Grant Cloud Build's service account read access to that bucket (see step 12
+above) — a silent permission failure on this step looks identical to the
+model just not being there.
 
 ### `torchvision::nms does not exist`
 

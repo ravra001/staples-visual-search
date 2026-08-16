@@ -1,0 +1,35 @@
+# Cloud Build config for continuous deployment: triggered on every push to
+# `main` (once the GitHub trigger below is created), builds the image and
+# deploys it to the EXISTING Cloud Run service. Deliberately does NOT
+# re-specify --add-cloudsql-instances / --set-secrets / --min-instances /
+# --concurrency / --memory / --cpu: gcloud run deploy retains whatever the
+# current revision already has for any flag you don't pass, so omitting
+# them here means "redeploy with the new image, touch nothing else" rather
+# than risking this file drifting out of sync with the real service config
+# and silently resetting something on the next auto-deploy.
+steps:
+# backend/models/ (the ~577MB bundled CLIP model) is .gitignore'd -- it
+# exceeds GitHub's 100MB file limit and was only ever included in earlier
+# deploys via a local tarball that bypassed git entirely. A build triggered
+# from a GitHub checkout doesn't have it, so fetch it from GCS (staged there
+# once, out of band) into the build context before docker build runs.
+- name: 'gcr.io/cloud-builders/gsutil'
+  args: ['-m', 'rsync', '-r', 'gs://opportune-box-136509-deploy-src/model-cache/hf', 'backend/models/hf']
+- name: 'gcr.io/cloud-builders/docker'
+  args: ['build', '-t', 'us-central1-docker.pkg.dev/$PROJECT_ID/staples-repo/staples-visual-search:$SHORT_SHA', '.']
+- name: 'gcr.io/cloud-builders/docker'
+  args: ['push', 'us-central1-docker.pkg.dev/$PROJECT_ID/staples-repo/staples-visual-search:$SHORT_SHA']
+- name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+  entrypoint: gcloud
+  args:
+  - 'run'
+  - 'deploy'
+  - 'staples-visual-search'
+  - '--image=us-central1-docker.pkg.dev/$PROJECT_ID/staples-repo/staples-visual-search:$SHORT_SHA'
+  - '--region=us-central1'
+
+images:
+- 'us-central1-docker.pkg.dev/$PROJECT_ID/staples-repo/staples-visual-search:$SHORT_SHA'
+
+options:
+  logging: CLOUD_LOGGING_ONLY   # required when the build runs under a non-default service account
