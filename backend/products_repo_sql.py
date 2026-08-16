@@ -147,6 +147,12 @@ def get_products_by_category(category):
         return [p.as_dict() for p in rows]
 
 
+def _like_escape(term):
+    """Escape LIKE wildcards in a user-supplied search term so e.g. "50%"
+    matches the literal characters "50%", not "50" followed by anything."""
+    return term.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
 def search_products(query):
     q = (query or "").strip()
     if not q:
@@ -155,12 +161,12 @@ def search_products(query):
         # AND across terms, each matched against name/brand/description.
         stmt = s.query(Product)
         for term in q.lower().split():
-            like = f"%{term}%"
+            like = f"%{_like_escape(term)}%"
             stmt = stmt.filter(or_(
-                func.lower(Product.name).like(like),
-                func.lower(Product.brand).like(like),
-                func.lower(Product.category).like(like),
-                func.lower(Product.description).like(like),
+                func.lower(Product.name).like(like, escape="\\"),
+                func.lower(Product.brand).like(like, escape="\\"),
+                func.lower(Product.category).like(like, escape="\\"),
+                func.lower(Product.description).like(like, escape="\\"),
             ))
         return [p.as_dict() for p in stmt.all()]
 
@@ -177,12 +183,12 @@ def search_products_page(query, limit=24, offset=0):
     with SessionLocal() as s:
         base = select(Product)
         for term in q.lower().split():
-            like = f"%{term}%"
+            like = f"%{_like_escape(term)}%"
             base = base.where(or_(
-                func.lower(Product.name).like(like),
-                func.lower(Product.brand).like(like),
-                func.lower(Product.category).like(like),
-                func.lower(Product.description).like(like),
+                func.lower(Product.name).like(like, escape="\\"),
+                func.lower(Product.brand).like(like, escape="\\"),
+                func.lower(Product.category).like(like, escape="\\"),
+                func.lower(Product.description).like(like, escape="\\"),
             ))
         total = s.execute(select(func.count()).select_from(base.subquery())).scalar_one()
         rows = s.execute(base.order_by(Product.sku).limit(limit).offset(offset)).scalars().all()
@@ -219,7 +225,15 @@ def search_by_vector(query_vec, category=None, k=8, restrict_skus=None):
         # feature — a ring of colored wedges — sits near the succulent/leaf
         # wall-art cluster). SET LOCAL scopes this to the current transaction
         # only, so it doesn't leak into other sessions/queries.
-        s.execute(text("SET LOCAL hnsw.ef_search = 200"))
+        #
+        # A category filter (below) is applied AFTER the graph walk picks its
+        # top-k nearest neighbors, not during it -- so if fewer than k of
+        # those happen to land in the target category, the query silently
+        # returns fewer than k rows (or zero) even when the category has
+        # plenty of items overall. Widen the search further in that case to
+        # compensate (ints only, not user input -- safe to inline into SET).
+        ef_search = 400 if category is not None else 200
+        s.execute(text(f"SET LOCAL hnsw.ef_search = {ef_search}"))
         rank_dist = Product.embedding.cosine_distance(query_vec)
         disp_dist = Product.image_embedding.cosine_distance(query_vec)
         stmt = (
@@ -350,9 +364,8 @@ def _load_reusable_vectors(path):
 
 def init_and_seed(reuse_vectors_from=None, embed_missing=False):
     """Create the schema (+ pgvector extension + HNSW index) and seed it from
-    the currently loaded catalog (products_data.PRODUCTS — whatever
-    config.yaml's data.catalog_file points to; independent of DATA_BACKEND,
-    so this never seeds from itself).
+    config.yaml's data.catalog_file — independent of DATA_BACKEND, so this
+    never seeds from itself.
 
     reuse_vectors_from: path to an index_*.npz to reuse vectors from (fast,
         recommended — see build_index.py). Products not covered by it are
@@ -361,7 +374,15 @@ def init_and_seed(reuse_vectors_from=None, embed_missing=False):
         call per product). Off by default so seeding never silently triggers
         a long embedding pass.
     """
-    from products_data import PRODUCTS, catalog_content_hash  # the loaded catalog, not this module's own table
+    from products_data import load_catalog_file, catalog_content_hash
+    # Loaded explicitly rather than via products_data.PRODUCTS: under
+    # DATA_BACKEND=sql (required to reach this function at all) that module
+    # global is deliberately NOT the full catalog — see products_data.py — to
+    # avoid every sql-backed process holding a ~6MB catalog parse in memory
+    # for a one-off management command it will never run.
+    if not config.CATALOG_FILE:
+        raise RuntimeError("init_and_seed requires CATALOG_FILE (config.yaml data.catalog_file) to be set.")
+    PRODUCTS = load_catalog_file(config.CATALOG_FILE)
 
     with engine.connect() as conn:
         conn.execute(text("CREATE EXTENSION IF NOT EXISTS vector"))

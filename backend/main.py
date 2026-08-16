@@ -85,9 +85,10 @@ def _normalize_rows(m):
 def _build_catalog_index():
     global _index_skus, _index_matrix, _index_image_matrix, _index_cats
     start = time.time()
-    products = [p for p in get_all_products() if os.path.exists(_image_path(p))]
+    all_products = get_all_products()
+    products = [p for p in all_products if os.path.exists(_image_path(p))]
     want = {p["sku"] for p in products}
-    cat_of = {p["sku"]: p["category"] for p in get_all_products()}
+    cat_of = {p["sku"]: p["category"] for p in all_products}
     fp = config.index_fingerprint(catalog_hash=catalog_content_hash())
 
     skus = vecs = image_vecs = None
@@ -397,8 +398,19 @@ def text_search(q: str = "", limit: int | None = config.PAGE_SIZE, offset: int =
 
 @app.get("/api/config")
 def app_config():
-    """Lets the frontend show which backends are live (demo transparency)."""
-    return {"embedding_backend": EMBEDDING_BACKEND, "data_backend": DATA_BACKEND}
+    """Lets the frontend show which backends are live (demo transparency),
+    plus enough index-health signal to tell "nothing loaded yet" apart from
+    "results are just weak for this photo" from the outside -- e.g.
+    category_centroids == 0 under DATA_BACKEND=sql means init_and_seed()
+    was never run, which otherwise only surfaces as a startup log line
+    (_load_sql_centroids) and a confusing "no furnishings recognized" on
+    every Shop the Room photo."""
+    return {
+        "embedding_backend": EMBEDDING_BACKEND,
+        "data_backend": DATA_BACKEND,
+        "category_centroids": int(_centroid_cats.shape[0]),
+        "index_size": int(_index_skus.shape[0]) if DATA_BACKEND != "sql" else None,
+    }
 
 
 _MAX_UPLOAD_BYTES = int(config.MAX_UPLOAD_MB * 1024 * 1024)
@@ -667,8 +679,13 @@ async def shop_the_room(request: Request, file: UploadFile = File(...)):
         raise HTTPException(400, "Please upload an image file")
 
     clen = request.headers.get("content-length")
-    if clen and int(clen) > _MAX_UPLOAD_BYTES:
-        raise HTTPException(413, f"Image too large (limit {config.MAX_UPLOAD_MB:g} MB)")
+    if clen:
+        try:
+            clen_int = int(clen)
+        except ValueError:
+            raise HTTPException(400, "Invalid Content-Length header")
+        if clen_int > _MAX_UPLOAD_BYTES:
+            raise HTTPException(413, f"Image too large (limit {config.MAX_UPLOAD_MB:g} MB)")
 
     image_bytes = await file.read(_MAX_UPLOAD_BYTES + 1)
     if len(image_bytes) == 0:
@@ -725,8 +742,13 @@ async def visual_search(request: Request, file: UploadFile = File(...),
 
     # Reject clearly-oversized uploads up front (before reading the body).
     clen = request.headers.get("content-length")
-    if clen and int(clen) > _MAX_UPLOAD_BYTES:
-        raise HTTPException(413, f"Image too large (limit {config.MAX_UPLOAD_MB:g} MB)")
+    if clen:
+        try:
+            clen_int = int(clen)
+        except ValueError:
+            raise HTTPException(400, "Invalid Content-Length header")
+        if clen_int > _MAX_UPLOAD_BYTES:
+            raise HTTPException(413, f"Image too large (limit {config.MAX_UPLOAD_MB:g} MB)")
 
     image_bytes = await file.read(_MAX_UPLOAD_BYTES + 1)   # bounded read (backstop; don't buffer huge uploads)
     if len(image_bytes) == 0:
@@ -832,6 +854,3 @@ def page(page_name: str):
     if os.path.exists(path):
         return FileResponse(path)
     raise HTTPException(404)
-
-
-app.mount("/frontend", StaticFiles(directory=FRONTEND_DIR), name="frontend")

@@ -7,6 +7,14 @@
 # them here means "redeploy with the new image, touch nothing else" rather
 # than risking this file drifting out of sync with the real service config
 # and silently resetting something on the next auto-deploy.
+# Defaults match what's actually deployed today -- override per-trigger in
+# the Cloud Build console (Settings > Substitution variables) rather than
+# editing this file, so the real bucket/host name isn't hardcoded into a
+# public repo (harmless as bare identifiers, but no reason to bake them in).
+substitutions:
+  _MODEL_BUCKET: 'opportune-box-136509-deploy-src'
+  _IMAGES_BASE_URL: 'https://34-110-248-3.sslip.io'
+
 steps:
 # backend/models/ (the ~577MB bundled CLIP model) is .gitignore'd -- it
 # exceeds GitHub's 100MB file limit and was only ever included in earlier
@@ -16,7 +24,7 @@ steps:
 # small model-cache files through the browser silently dropped files) --
 # and unpack it into the build context before docker build runs.
 - name: 'gcr.io/cloud-builders/gsutil'
-  args: ['cp', 'gs://opportune-box-136509-deploy-src/model-cache/hf_model.zip', 'hf_model.zip']
+  args: ['cp', 'gs://${_MODEL_BUCKET}/model-cache/hf_model.zip', 'hf_model.zip']
 - name: 'python:3.11-slim'
   entrypoint: 'python'
   args: ['-c', "import zipfile; zipfile.ZipFile('hf_model.zip').extractall('backend/models')"]
@@ -37,7 +45,7 @@ steps:
   # set up in GCP_SETUP.md step 13 (verified ACTIVE + serving before this
   # was added). --set-env-vars replaces the full env var list, but doesn't
   # touch --set-secrets (DATABASE_URL is a secret, a separate namespace).
-  - '--set-env-vars=IMAGES_BASE_URL=https://34-110-248-3.sslip.io'
+  - '--set-env-vars=IMAGES_BASE_URL=${_IMAGES_BASE_URL}'
 
 images:
 - 'us-central1-docker.pkg.dev/$PROJECT_ID/staples-repo/staples-visual-search:$SHORT_SHA'

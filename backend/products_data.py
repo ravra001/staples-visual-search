@@ -116,13 +116,29 @@ PRODUCTS = [
 # Set CATALOG_FILE=data/catalog_abo.json to replace the built-in demo catalog.
 # --------------------------------------------------------------------------
 
+def load_catalog_file(catalog_file):
+    """Parse a catalog JSON file, dropping private ingest-only fields (keys
+    starting with "_"). Factored out so init_and_seed (products_repo_sql.py)
+    can load the real catalog explicitly under DATA_BACKEND=sql, where
+    PRODUCTS below is deliberately NOT the full file (see comment there)."""
+    path = catalog_file if os.path.isabs(catalog_file) else os.path.join(os.path.dirname(__file__), catalog_file)
+    with open(path, encoding="utf-8") as f:
+        loaded = json.load(f)
+    return [{k: v for k, v in p.items() if not k.startswith("_")} for p in loaded]
+
+
 _CATALOG_FILE = config.CATALOG_FILE
-if _CATALOG_FILE:
-    _path = _CATALOG_FILE if os.path.isabs(_CATALOG_FILE) else os.path.join(os.path.dirname(__file__), _CATALOG_FILE)
-    with open(_path, encoding="utf-8") as _f:
-        _loaded = json.load(_f)
-    # drop any private ingest-only fields (keys starting with "_")
-    PRODUCTS = [{k: v for k, v in p.items() if not k.startswith("_")} for p in _loaded]
+DATA_BACKEND = config.DATA_BACKEND
+
+# Under DATA_BACKEND=sql, nothing at runtime reads PRODUCTS or _BY_SKU — every
+# request goes through the dispatched get_all_products()/etc below, which are
+# rebound entirely to products_repo_sql. The only consumer of the full catalog
+# under sql is the one-off init_and_seed() management command, which loads it
+# explicitly via load_catalog_file() rather than depending on this module-level
+# copy. So skip parsing (and holding in RAM for the rest of the process's
+# life) a ~6MB catalog file a live sql-backed instance will never look at.
+if _CATALOG_FILE and DATA_BACKEND != "sql":
+    PRODUCTS = load_catalog_file(_CATALOG_FILE)
     print(f"[catalog] loaded {len(PRODUCTS)} products from {_CATALOG_FILE}")
 
 
@@ -130,8 +146,10 @@ if _CATALOG_FILE:
 # In-memory backend
 # --------------------------------------------------------------------------
 
-# O(1) sku lookup, built once (the catalog is static in memory mode).
-_BY_SKU = {p["sku"]: p for p in PRODUCTS}
+# O(1) sku lookup, built once (the catalog is static in memory mode). Skipped
+# under sql for the same reason as above — PRODUCTS is the small built-in demo
+# list there, not the real catalog, and nothing reads _BY_SKU in that mode.
+_BY_SKU = {p["sku"]: p for p in PRODUCTS} if DATA_BACKEND != "sql" else {}
 
 def _mem_all():
     return PRODUCTS
@@ -162,8 +180,6 @@ def _mem_search(query):
 # --------------------------------------------------------------------------
 # Backend dispatch
 # --------------------------------------------------------------------------
-
-DATA_BACKEND = config.DATA_BACKEND
 
 if DATA_BACKEND == "sql":
     # Lazy import so the default path never needs SQLAlchemy installed.

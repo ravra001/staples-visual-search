@@ -230,11 +230,11 @@ async function renderCategoryNav() {
   if (strip) {
     // keep the top nav strip readable — cap it, the rest live in the menu
     strip.innerHTML = cats.slice(0, 9).map(c =>
-      `<a href="/category.html?category=${encodeURIComponent(c)}">${prettifyCategory(c)}</a>`).join("");
+      `<a href="/category.html?category=${encodeURIComponent(c)}">${esc(prettifyCategory(c))}</a>`).join("");
   }
   if (menu) {
     menu.innerHTML = cats.map(c =>
-      `<a class="menu-item" href="/category.html?category=${encodeURIComponent(c)}">${prettifyCategory(c)}</a>`).join("");
+      `<a class="menu-item" href="/category.html?category=${encodeURIComponent(c)}">${esc(prettifyCategory(c))}</a>`).join("");
   }
 }
 
@@ -328,7 +328,7 @@ async function renderSampleProducts(elId, skus = SAMPLE_SKUS) {
     el.innerHTML = picks.map(p => productCardHTML(p)).join("");
     wireProductCardInteractions(el);
   } catch (e) {
-    el.innerHTML = `<div class="state-msg">${e.message}. Please refresh.</div>`;
+    el.innerHTML = `<div class="state-msg">${esc(e.message)}. Please refresh.</div>`;
   }
 }
 
@@ -339,7 +339,7 @@ async function renderCategoryGrid(elId) {
   if (!el) return;
   const cats = await getCategories();
   el.innerHTML = cats.map(c => `
-    <a class="cat-tile" href="/category.html?category=${encodeURIComponent(c)}"><span>${prettifyCategory(c)}</span></a>
+    <a class="cat-tile" href="/category.html?category=${encodeURIComponent(c)}"><span>${esc(prettifyCategory(c))}</span></a>
   `).join("");
 }
 
@@ -354,7 +354,7 @@ function productCardHTML(p, opts = {}) {
     : "";
   const href = `/product.html?sku=${encodeURIComponent(p.sku)}`;
   return `
-    <div class="product-card" data-sku="${p.sku}">
+    <div class="product-card" data-sku="${esc(p.sku)}">
       ${matchBadge}
       <div class="product-media">
         <a href="${href}"><img src="${esc(p.image_url)}" alt="${esc(p.name)}" loading="lazy" /></a>
@@ -418,7 +418,7 @@ async function renderProductRail(elId, { category, limit = 12, offset = 0 } = {}
     el.innerHTML = data.items.map(p => productCardHTML(p)).join("");
     wireProductCardInteractions(el);
   } catch (e) {
-    el.innerHTML = `<div class="state-msg">${e.message}. Please refresh.</div>`;
+    el.innerHTML = `<div class="state-msg">${esc(e.message)}. Please refresh.</div>`;
   }
 }
 
@@ -485,7 +485,7 @@ async function renderListingPage({ category, query } = {}) {
       _listing.offset += data.items.length;
       _renderLoadMore(_listing.offset < _listing.total, _loadListingPage);
     } catch (e) {
-      if (reset) { countEl.textContent = ""; grid.innerHTML = `<div class="state-msg">${e.message}. Please try again.</div>`; }
+      if (reset) { countEl.textContent = ""; grid.innerHTML = `<div class="state-msg">${esc(e.message)}. Please try again.</div>`; }
     }
   }
 }
@@ -524,7 +524,7 @@ function renderHeroSamples(mountId) {
   const mount = document.getElementById(mountId);
   if (!mount) return;
   mount.innerHTML = HERO_SAMPLE_SKUS.map(sku => `
-    <button class="hero-sample-thumb" data-sku="${sku}" title="Search with this photo">
+    <button class="hero-sample-thumb" data-sku="${esc(sku)}" title="Search with this photo">
       <img src="/images/products/${sku}.jpg" alt="" loading="lazy" />
     </button>`).join("");
   mount.querySelectorAll(".hero-sample-thumb").forEach(btn => {
@@ -664,13 +664,14 @@ async function runShopTheRoom(file) {
     });
   } catch (e) {
     statusEl.textContent = "Something went wrong.";
-    grid.innerHTML = `<div class="state-msg">${e.message}.</div>`;
+    grid.innerHTML = `<div class="state-msg">${esc(e.message)}.</div>`;
   }
 }
 
 function renderShopTheRoomPage() {
   const thumb = document.getElementById("room-thumb");
   const dataUrl = sessionStorage.getItem("roomQueryImage");
+  sessionStorage.removeItem("roomQueryImage");   // see the matching comment in renderVisualSearchResultsPage
   if (dataUrl) {
     thumb.src = dataUrl;
     fetch(dataUrl).then(r => r.blob()).then(blob => {
@@ -762,6 +763,15 @@ let _lastResultData = null;
 let _currentSort = "match";      // "match" | "price-asc" | "price-desc"
 let _currentMaxPrice = null;     // set by an explicit "under $X" refinement; null = no cap
 
+// Guards against an in-flight-response race: double-clicking Refine, or a
+// category-chip click landing while a previous search is still in flight,
+// fires a second runVisualSearch/runSimilarSearch before the first resolves.
+// Without a way to tell them apart, whichever response arrives LAST wins --
+// which may be the older, now-irrelevant one. Each call grabs a unique,
+// increasing token; if _searchSeq has moved on by the time its response
+// lands, it's stale and gets dropped instead of overwriting newer results.
+let _searchSeq = 0;
+
 // Parses a refine-box string into its price-intent parts and whatever visual
 // text is left over. Two things this fixes vs. a bare keyword match:
 //   1. "under $50" previously just triggered an ascending sort — the number
@@ -852,6 +862,7 @@ function renderSortControl() {
 }
 
 async function runVisualSearch(file, opts = {}) {
+  const mySeq = ++_searchSeq;
   _lastQueryFile = file;
   _lastQuerySku = null;   // mutually exclusive with "find similar" mode — see runSimilarSearch
   const scope = opts.scope || "auto";
@@ -883,14 +894,16 @@ async function runVisualSearch(file, opts = {}) {
       throw new Error(err.detail || "Search failed");
     }
     const data = await res.json();
+    if (mySeq !== _searchSeq) return;   // a newer search started while this one was in flight -- drop it
     _lastResultData = data;
     renderCategoryChip(data);
     applySortAndRender();
     renderRefineBox(data);
   } catch (e) {
+    if (mySeq !== _searchSeq) return;
     _clearVsExtra();
     statusEl.textContent = "Something went wrong analyzing that photo.";
-    grid.innerHTML = `<div class="state-msg">${e.message}. Try a different image.</div>`;
+    grid.innerHTML = `<div class="state-msg">${esc(e.message)}. Try a different image.</div>`;
   }
 }
 
@@ -1038,7 +1051,7 @@ function renderCategoryChip(data) {
   if (!chip) return;
   if (!data.predicted_category) { chip.hidden = true; return; }
 
-  const label = prettifyCategory(data.predicted_category);
+  const label = esc(prettifyCategory(data.predicted_category));
   const conf = data.confidence != null ? `${data.confidence}%` : "";
   if (data.scoped) {
     chip.innerHTML =
@@ -1066,6 +1079,7 @@ function renderCategoryChip(data) {
 // real reason "find similar, but in black" couldn't work identically to
 // refining an upload.
 async function runSimilarSearch(sku, opts = {}) {
+  const mySeq = ++_searchSeq;
   _lastQuerySku = sku;
   _lastQueryFile = null;   // mutually exclusive with photo-search mode — see runVisualSearch
   const refineText = opts.refineText !== undefined ? opts.refineText : _lastRefineText;
@@ -1089,15 +1103,21 @@ async function runSimilarSearch(sku, opts = {}) {
     const pRes = await fetch(`${API_BASE}/api/products/${encodeURIComponent(sku)}`);
     if (!pRes.ok) throw new Error("Product not found");
     const product = await pRes.json();
+    if (mySeq !== _searchSeq) return;   // a newer search started while this one was in flight -- drop it
     if (thumb) thumb.src = product.image_url;
     if (hint) hint.textContent = `Products that visually match "${product.name}".`;
 
-    const qs = new URLSearchParams();
+    // Match photo-search's pool size (48 fetched, 12 shown by default -- see
+    // how-it-works.html) so sort/price-refine has the same material to work
+    // with here as it does after an upload; the endpoint's own default (12)
+    // would otherwise silently shrink the pool on this path only.
+    const qs = new URLSearchParams({ top_k: "48" });
     if (refineText) qs.set("refine_text", refineText);
     const t0 = performance.now();
     const res = await fetch(`${API_BASE}/api/products/${encodeURIComponent(sku)}/similar?${qs}`);
     if (!res.ok) throw new Error("Could not find similar products");
     const data = await res.json();
+    if (mySeq !== _searchSeq) return;
     const tookMs = Math.round(performance.now() - t0);
 
     if (statsEl) statsEl.textContent = data.count ? `Found ${data.count} similar products in ${tookMs}ms` : "";
@@ -1114,8 +1134,9 @@ async function runSimilarSearch(sku, opts = {}) {
     }
     renderRefineBox(data);
   } catch (e) {
+    if (mySeq !== _searchSeq) return;
     statusEl.textContent = "Something went wrong.";
-    grid.innerHTML = `<div class="state-msg">${e.message}.</div>`;
+    grid.innerHTML = `<div class="state-msg">${esc(e.message)}.</div>`;
   }
 }
 
@@ -1366,6 +1387,11 @@ function renderVisualSearchResultsPage() {
 
   const thumb = document.getElementById("query-thumb");
   const dataUrl = sessionStorage.getItem("vsQueryImage");
+  // Consume it -- a reload of this page shouldn't silently re-run a now-stale
+  // query, and there's no reason to keep occupying sessionStorage's small
+  // quota once the handoff is done (refine/re-search after this point reuses
+  // the in-memory File via _lastQueryFile, not this key).
+  sessionStorage.removeItem("vsQueryImage");
   if (dataUrl) {
     thumb.src = dataUrl;
     // convert back to a File so we can POST it
@@ -1445,7 +1471,7 @@ async function renderProductDetail(elId) {
           <ul class="pdp-perks">
             <li>✓ Free shipping on orders $45+</li>
             <li>✓ Free & easy returns</li>
-            <li>✓ SKU: ${p.sku}</li>
+            <li>✓ SKU: ${esc(p.sku)}</li>
           </ul>
         </div>
       </div>`;
@@ -1469,7 +1495,7 @@ async function renderProductDetail(elId) {
     renderSimilarRail("related-rail", p.sku);
     renderSimilarRail("cheaper-rail", p.sku, { maxPrice: p.price });
   } catch (e) {
-    el.innerHTML = `<div class="state-msg">${e.message}. <a href="/">Back to home</a></div>`;
+    el.innerHTML = `<div class="state-msg">${esc(e.message)}. <a href="/">Back to home</a></div>`;
   }
 }
 
@@ -1481,7 +1507,7 @@ async function renderProductDetail(elId) {
 function cartLineItemHTML(p) {
   const href = `/product.html?sku=${encodeURIComponent(p.sku)}`;
   return `
-    <div class="cart-line" data-sku="${p.sku}">
+    <div class="cart-line" data-sku="${esc(p.sku)}">
       <a href="${href}" class="cart-line-media"><img src="${esc(p.image_url)}" alt="${esc(p.name)}" /></a>
       <div class="cart-line-info">
         <a href="${href}" class="cart-line-name">${esc(p.name)}</a>

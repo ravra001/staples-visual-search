@@ -45,13 +45,19 @@ def _val(env_name, yaml_path, default=None):
     return default if v is None else v
 
 
+def _bool_val(env_name, yaml_path, default):
+    """Like _val, but coerced to bool — an env var override arrives as a
+    string ("true"/"1"), while the YAML fallback is already a real bool."""
+    return str(_val(env_name, yaml_path, default)).lower() in ("1", "true", "yes")
+
+
 # ---- embedding ----
 EMBEDDING_BACKEND = str(_val("EMBEDDING_BACKEND", "embedding.backend", "heuristic")).lower()
 CLIP_MODEL = _val("CLIP_MODEL", "embedding.clip.model", "ViT-B-32")
 CLIP_PRETRAINED = _val("CLIP_PRETRAINED", "embedding.clip.pretrained", "laion2b_s34b_b79k")
 CLIP_CACHE_DIR = _val("CLIP_CACHE_DIR", "embedding.clip.cache_dir", "models/hf")
 CLIP_OFFLINE = str(_val("CLIP_OFFLINE", "embedding.clip.offline", "auto")).lower()
-TEXT_FUSION_ENABLED = bool(_yaml("embedding.text_fusion.enabled", False))
+TEXT_FUSION_ENABLED = _bool_val("TEXT_FUSION_ENABLED", "embedding.text_fusion.enabled", False)
 TEXT_FUSION_IMAGE_WEIGHT = float(_val("TEXT_FUSION_IMAGE_WEIGHT", "embedding.text_fusion.image_weight", 0.3))
 GCP_PROJECT = _val("GCP_PROJECT", "embedding.vertex.project", None)
 GCP_LOCATION = _val("GCP_LOCATION", "embedding.vertex.location", "us-central1")
@@ -66,18 +72,21 @@ TOP_K = int(_val("TOP_K", "search.top_k", 8))
 PAGE_SIZE = int(_val("PAGE_SIZE", "search.page_size", 48))
 MAX_UPLOAD_MB = float(_val("MAX_UPLOAD_MB", "search.max_upload_mb", 10))
 MATCH_THRESHOLD = float(_val("MATCH_THRESHOLD", "search.match_threshold", 55))
-CLASSIFIER_ENABLED = bool(_yaml("search.category_classifier.enabled", True))
+CLASSIFIER_ENABLED = _bool_val("CLASSIFIER_ENABLED", "search.category_classifier.enabled", True)
 CONF_THRESHOLD = float(_val("CONF_THRESHOLD", "search.category_classifier.confidence_threshold", 45.0))
 SOFTMAX_T = float(_val("SOFTMAX_T", "search.category_classifier.softmax_temperature", 0.07))
 
 # ---- index ----
-REQUIRE_PREBUILT_INDEX = str(_val("REQUIRE_PREBUILT_INDEX", "index.require_prebuilt", False)).lower() in ("1", "true", "yes")
+REQUIRE_PREBUILT_INDEX = _bool_val("REQUIRE_PREBUILT_INDEX", "index.require_prebuilt", False)
 
 # ---- server ----
 SERVER_HOST = _val("HOST", "server.host", "127.0.0.1")
 SERVER_PORT = int(_val("PORT", "server.port", 8000))
-SERVER_RELOAD = bool(_yaml("server.reload", False))
-CORS_ORIGINS = _yaml("server.cors_origins", ["*"]) or ["*"]
+SERVER_RELOAD = _bool_val("SERVER_RELOAD", "server.reload", False)
+# CORS_ORIGINS is a list, so it doesn't fit _val's single-value env override —
+# a CORS_ORIGINS env var (comma-separated) wins if set, else the YAML list.
+_cors_env = os.environ.get("CORS_ORIGINS")
+CORS_ORIGINS = [o.strip() for o in _cors_env.split(",") if o.strip()] if _cors_env else (_yaml("server.cors_origins", ["*"]) or ["*"])
 
 # ---- product images ----
 # Empty (default) = serve from this container's own filesystem, as today.
