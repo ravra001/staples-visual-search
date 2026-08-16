@@ -79,6 +79,14 @@ SERVER_PORT = int(_val("PORT", "server.port", 8000))
 SERVER_RELOAD = bool(_yaml("server.reload", False))
 CORS_ORIGINS = _yaml("server.cors_origins", ["*"]) or ["*"]
 
+# ---- product images ----
+# Empty (default) = serve from this container's own filesystem, as today.
+# Set to a GCS/Cloud CDN origin (no trailing slash, e.g.
+# "https://34-120-1-2.sslip.io") to instead redirect /images/products/* to
+# it — frees the container's CPU/concurrency budget (shared with CLIP
+# inference) from serving static image bytes. See GCP_SETUP.md.
+IMAGES_BASE_URL = (_val("IMAGES_BASE_URL", "images.base_url", "") or "").rstrip("/")
+
 
 def index_fingerprint(catalog_hash=None):
     """Identity of the model (+ fusion config, + optionally the catalog content)

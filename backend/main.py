@@ -17,7 +17,7 @@ import config
 from fastapi import FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, RedirectResponse
 from starlette.concurrency import run_in_threadpool
 
 from products_data import (
@@ -741,6 +741,20 @@ async def visual_search(request: Request, file: UploadFile = File(...),
 
 
 # ---------- static assets ----------
+
+# When IMAGES_BASE_URL is set (production), redirect product-image requests
+# to the GCS/Cloud CDN origin instead of serving the bytes from this
+# container — registered BEFORE the static mount below so it takes
+# precedence for this one path, while everything else under /images (e.g.
+# the built-in 30-item demo catalog's generated PNGs, which were never
+# uploaded to the CDN) still falls through to local disk. A redirect rather
+# than rewriting every image_url at the source means the frontend's few
+# hardcoded /images/products/... references (the homepage sample-photo
+# thumbnails) get the same benefit with no frontend changes needed.
+if config.IMAGES_BASE_URL:
+    @app.get("/images/products/{filename}")
+    def redirect_product_image(filename: str):
+        return RedirectResponse(f"{config.IMAGES_BASE_URL}/products/{filename}", status_code=302)
 
 app.mount("/images", StaticFiles(directory=os.path.join(BASE_DIR, "static", "images")), name="images")
 app.mount("/assets", StaticFiles(directory=os.path.join(FRONTEND_DIR, "assets")), name="assets")
