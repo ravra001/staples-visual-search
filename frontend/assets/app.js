@@ -1196,6 +1196,82 @@ function wireCropToggle(buttonId) {
   document.getElementById(buttonId)?.addEventListener("click", openCropToSearch);
 }
 
+// ---------- Scan to try on your phone (QR + mobile capture) ----------
+// Desktop side: a button opens a modal with a QR code pointing back at this
+// same app with ?mobilescan=1. Mobile side: renderMobileScanLanding (called
+// unconditionally on page load) checks for that flag and, if present,
+// replaces the page with a single big camera button — tap it, take a photo,
+// and it runs the exact same search pipeline as the desktop upload flow
+// (startVisualSearch), just entered from a phone's actual camera instead of
+// a file picker.
+let _scanModalBuilt = false;
+
+function buildScanModal() {
+  if (_scanModalBuilt) return;
+  _scanModalBuilt = true;
+  const modal = document.createElement("div");
+  modal.id = "vs-scan-modal";
+  modal.className = "vs-scan-modal";
+  modal.hidden = true;
+  modal.innerHTML = `
+    <div class="vs-scan-modal-inner">
+      <h3>Scan to try on your phone</h3>
+      <p>Open your phone's camera app and point it at the code below.</p>
+      <div id="vs-scan-qr"></div>
+      <div class="vs-scan-url" id="vs-scan-url"></div>
+      <button id="vs-scan-close" type="button">Close</button>
+    </div>`;
+  document.body.appendChild(modal);
+  modal.querySelector("#vs-scan-close").addEventListener("click", () => { modal.hidden = true; });
+  modal.addEventListener("click", (e) => { if (e.target === modal) modal.hidden = true; });
+}
+
+function openScanModal() {
+  buildScanModal();
+  const modal = document.getElementById("vs-scan-modal");
+  const url = `${location.origin}/?mobilescan=1`;
+  const qrEl = document.getElementById("vs-scan-qr");
+  qrEl.innerHTML = "";
+  new QRCode(qrEl, { text: url, width: 200, height: 200, correctLevel: QRCode.CorrectLevel.M });
+  document.getElementById("vs-scan-url").textContent = url;
+  modal.hidden = false;
+}
+
+function wireScanToggle(buttonId) {
+  document.getElementById(buttonId)?.addEventListener("click", openScanModal);
+}
+
+// Called on every page load (cheap no-op unless ?mobilescan=1 is present) —
+// see index.html.
+function renderMobileScanLanding() {
+  if (new URLSearchParams(location.search).get("mobilescan") !== "1") return;
+
+  const overlay = document.createElement("div");
+  overlay.className = "vs-mobile-scan";
+  overlay.innerHTML = `
+    <h1>Search by photo</h1>
+    <p>Tap the button, take a photo of anything for your home or office, and we'll find it in the catalog.</p>
+    <button id="vs-mobile-scan-btn" class="vs-mobile-scan-btn" type="button" aria-label="Open camera">
+      <svg viewBox="0 0 24 24" width="34" height="34" fill="none" stroke="currentColor" stroke-width="2">
+        <path d="M4 8a2 2 0 0 1 2-2h1.5l1-1.5h7l1 1.5H18a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V8z"/>
+        <circle cx="12" cy="12.5" r="3.5"/>
+      </svg>
+    </button>
+    <span class="vs-mobile-scan-label">Open Camera</span>
+    <input id="vs-mobile-scan-input" type="file" accept="image/*" capture="environment" hidden />
+  `;
+  document.body.appendChild(overlay);
+
+  const input = overlay.querySelector("#vs-mobile-scan-input");
+  overlay.querySelector("#vs-mobile-scan-btn").addEventListener("click", () => input.click());
+  input.addEventListener("change", () => {
+    const file = input.files[0];
+    input.value = "";
+    if (!file) return;
+    startVisualSearch(file);
+  });
+}
+
 // ---------- Global image drop / paste-to-search ----------
 // Works on every page (wired from renderSiteChrome) — drag an image file
 // anywhere on the site, or paste one from the clipboard, and it runs the
