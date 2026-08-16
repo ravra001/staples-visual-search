@@ -27,9 +27,13 @@ backend/data/index_compare.npz
 # The heuristic-backend index isn't needed when shipping EMBEDDING_BACKEND=clip.
 backend/data/index_heuristic.npz
 
+# These three used to be excluded here, which meant the Dockerfile's later
+# `COPY README.md GCP_SETUP.md HOW_IT_WORKS.md RUN_10K.md ./` failed at
+# build time -- Docker excludes files from the build context before COPY
+# ever runs, so "not part of the runtime app" and "not in the image" turned
+# out to also mean "not servable by main.py's root_doc route", 500ing on
+# every click from the architecture/how-it-works pages. Now shipped
+# on purpose -- see root_doc in main.py.
 docker-compose.yml
 Dockerfile
 .dockerignore
-README.md
-HOW_IT_WORKS.md
-RUN_10K.md
