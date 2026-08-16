@@ -88,7 +88,7 @@
           </div>
           <div class="flow-arrow">HTTPS</div>
           <div class="tier">
-            <div class="node infra wide"><b>Cloud Run's own HTTPS endpoint</b><small>TLS terminated by Cloud Run — no separate load balancer provisioned for the demo. Cloud CDN in front of product images is planned, not yet wired up (images are still served from the container).</small></div>
+            <div class="node infra wide"><b>Cloud Run's own HTTPS endpoint</b><small>TLS terminated by Cloud Run for the app itself. Product images are separately fronted by their own HTTPS load balancer + Cloud CDN (see the GCS node below) — <code>GET /images/products/*</code> 302s straight from Cloud Run to that CDN, so image bytes never pass through the app container.</small></div>
           </div>
           <div class="flow-arrow">routed request</div>
           <div class="tier">
@@ -98,7 +98,7 @@
           <div class="tier three">
             <div class="node ml"><b>Local CLIP</b><small>bundled in the container image<br/>(577MB) — no per-query network hop<br/><em>Vertex AI: coded, not yet swapped in</em></small></div>
             <div class="node data"><b>Cloud SQL + pgvector</b><small>products table:<br/>row + embedding + image_embedding<br/>+ model_version, HNSW-indexed</small></div>
-            <div class="node data"><b>Container filesystem</b><small>product images bundled in the image<br/><em>GCS + Cloud CDN: planned, not yet built</em></small></div>
+            <div class="node data"><b>GCS + Cloud CDN</b><small>product images, HTTPS load balancer + Google-managed cert (sslip.io hostname, no custom domain needed) — <code>IMAGES_BASE_URL</code> live</small></div>
           </div>
           <div class="tier">
             <div class="node infra wide"><b>Catalog index</b><small>pgvector similarity <em>in the database</em> (<code>embedding &lt;=&gt; q</code>, category-filtered, <code>ef_search=200</code>) — no separate index file</small></div>
@@ -265,7 +265,7 @@
           <tr><td>Compute</td><td>Uvicorn process</td><td>Cloud Run (container, autoscaled, min-instances=1)</td><td>deploy target</td></tr>
           <tr><td>Embedding model</td><td>local CLIP</td><td>local CLIP (bundled in the image) — Vertex AI coded but untested</td><td><code>embedding.backend</code></td></tr>
           <tr><td>Product catalog</td><td>in-memory Python list</td><td>Cloud SQL + pgvector (row + vector, HNSW-indexed)</td><td><code>data.backend</code> + <code>database_url</code></td></tr>
-          <tr><td>Product images</td><td>local filesystem</td><td>container filesystem — GCS + Cloud CDN planned, not built</td><td>static mount</td></tr>
+          <tr><td>Product images</td><td>local filesystem</td><td>GCS + Cloud CDN — HTTPS load balancer, Google-managed cert, live</td><td>302 redirect to CDN (<code>IMAGES_BASE_URL</code>)</td></tr>
           <tr><td>Vector ranking</td><td>vectorized cosine (in-memory matrix)</td><td>pgvector similarity (SQL) — right choice at 10k rows, not a stopgap; Vertex Vector Search only worth it past ~10M vectors</td><td>catalog size</td></tr>
           <tr><td>Index freshness</td><td>rebuild <code>index_*.npz</code></td><td>manual <code>init_and_seed()</code> run — event-driven pipeline not yet built</td><td>ingestion</td></tr>
           <tr><td>Secrets / config</td><td><code>config.yaml</code> + env</td><td><code>config.yaml</code> + Secret Manager (DB URL)</td><td>runtime env</td></tr>

@@ -177,6 +177,12 @@
         <p>The in-memory dev backend and the live Postgres/pgvector backend are checked to produce
            byte-for-byte identical rankings for the same query — not assumed, tested.</p>
       </div>
+      <div class="pitch-proof-card">
+        <h4>✓ CI/CD + CDN, shipped and verified</h4>
+        <p>Every push to <code>main</code> now auto-builds and auto-deploys via Cloud Build. Product images
+           are fronted by their own HTTPS load balancer + Cloud CDN with a Google-managed cert — verified
+           live, not just wired up.</p>
+      </div>
     </div>
   </section>
 
@@ -193,12 +199,6 @@
            The code path already exists (one config value swaps it in) but has never been run against
            production traffic or measured for the real tradeoff — API latency and per-call cost vs. a
            bundled model's image size and cold-start time.</p>
-      </li>
-      <li>
-        <span class="pitch-roadmap-badge">Planned</span>
-        <p><b>Serve product images from Cloud Storage + Cloud CDN</b>
-           Currently bundled in the container image; moving them out is the single highest-payoff
-           infrastructure change identified so far, and hasn't been built yet.</p>
       </li>
       <li>
         <span class="pitch-roadmap-badge">Planned</span>
