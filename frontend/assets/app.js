@@ -124,6 +124,10 @@ function renderSiteHeader() {
             <svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" stroke-width="2"><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/></svg>
           </button>
           <div class="menu-dropdown" id="menu-dropdown" hidden>
+            <a class="menu-feature" href="/pitch.html">
+              <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M3 3v18h18"/><path d="m19 9-5 5-4-4-3 3"/></svg>
+              <span><strong>Project Overview</strong><small>Business value &amp; what's built, in one page</small></span>
+            </a>
             <a class="menu-feature" href="/architecture.html">
               <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M3 21h18"/><path d="M5 21V9l7-5 7 5v12"/><path d="M9 21v-6h6v6"/></svg>
               <span><strong>Architecture Overview</strong><small>On-prem &amp; GCP architecture, explained visually</small></span>
@@ -131,10 +135,6 @@ function renderSiteHeader() {
             <a class="menu-feature" href="/how-it-works.html">
               <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M4 5.5A1.5 1.5 0 0 1 5.5 4H11v16H5.5A1.5 1.5 0 0 1 4 18.5z"/><path d="M20 5.5A1.5 1.5 0 0 0 18.5 4H13v16h5.5a1.5 1.5 0 0 0 1.5-1.5z"/></svg>
               <span><strong>How It Works</strong><small>The search pipeline, step by step</small></span>
-            </a>
-            <a class="menu-item" href="/compare-methods.html" style="display:flex;align-items:center;gap:8px;">
-              <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.7" style="flex-shrink:0;"><path d="M3 3v18h18"/><path d="M18 17V9"/><path d="M13 17V5"/><path d="M8 17v-3"/></svg>
-              Compare methods <em style="font-style:normal;color:var(--gray-text);font-size:11px;">(experimental)</em>
             </a>
             <div class="menu-divider"></div>
             <p class="menu-label">Shop by category</p>
