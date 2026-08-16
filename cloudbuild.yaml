@@ -11,10 +11,15 @@ steps:
 # backend/models/ (the ~577MB bundled CLIP model) is .gitignore'd -- it
 # exceeds GitHub's 100MB file limit and was only ever included in earlier
 # deploys via a local tarball that bypassed git entirely. A build triggered
-# from a GitHub checkout doesn't have it, so fetch it from GCS (staged there
-# once, out of band) into the build context before docker build runs.
+# from a GitHub checkout doesn't have it, so fetch it from GCS -- staged
+# there once, out of band, as a single zip (a folder upload of thousands of
+# small model-cache files through the browser silently dropped files) --
+# and unpack it into the build context before docker build runs.
 - name: 'gcr.io/cloud-builders/gsutil'
-  args: ['-m', 'rsync', '-r', 'gs://opportune-box-136509-deploy-src/model-cache/hf', 'backend/models/hf']
+  args: ['cp', 'gs://opportune-box-136509-deploy-src/model-cache/hf_model.zip', 'hf_model.zip']
+- name: 'python:3.11-slim'
+  entrypoint: 'python'
+  args: ['-c', "import zipfile; zipfile.ZipFile('hf_model.zip').extractall('backend/models')"]
 - name: 'gcr.io/cloud-builders/docker'
   args: ['build', '-t', 'us-central1-docker.pkg.dev/$PROJECT_ID/staples-repo/staples-visual-search:$SHORT_SHA', '.']
 - name: 'gcr.io/cloud-builders/docker'
