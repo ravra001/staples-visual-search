@@ -433,6 +433,107 @@ From then on, `git push origin main` is the entire deploy process.
 
 ---
 
+## 13. Product images via GCS + Cloud CDN
+
+Right now, product images can be served straight from the Cloud Run
+container's own filesystem — simple, but they then compete with CLIP
+inference for the same container's CPU/concurrency budget on every catalog
+page load. Moving them to a GCS bucket fronted by a real Cloud CDN (an
+external HTTPS load balancer with a backend bucket) removes that contention
+entirely, and this app already has the plumbing for it: set
+`IMAGES_BASE_URL` and every product-image request 302s to the CDN instead
+(see `backend/main.py`'s `redirect_product_image`) — no other code needs to
+change, since every image reference in the app (API-provided or the
+homepage's hardcoded sample thumbnails) already goes through the same
+same-origin relative path.
+
+**Create the bucket and make objects public** (product photos on a shopping
+site — non-sensitive, meant to be public assets):
+
+```bash
+export IMAGES_BUCKET="${PROJECT_ID}-product-images"
+
+gsutil mb -l "$REGION" "gs://${IMAGES_BUCKET}"
+gsutil uniformbucketlevelaccess set on "gs://${IMAGES_BUCKET}"
+gsutil iam ch allUsers:objectViewer "gs://${IMAGES_BUCKET}"
+```
+
+**Get the images into the bucket via git**, since they're tracked in the
+repo (unlike the CLIP model) — no manual upload needed, just a clone
++ `gsutil cp`. This requires the GitHub repo to be cloneable from Cloud
+Shell with no stored credentials, i.e. **public** — if it's private, either
+make it public (Settings → Danger Zone → Change visibility — fine for a
+hackathon repo, and consistent with this project's "everything is real,
+verify it yourself" framing) or use a Personal Access Token in the clone
+URL instead:
+
+```bash
+cd ~ && rm -rf staples-images-src
+git clone --depth=1 https://github.com/<you>/<repo>.git staples-images-src
+cd staples-images-src/backend/static/images/products
+
+# Real Cache-Control header -- GCS doesn't set one by default, and Cloud
+# CDN only caches at the edge if the origin says to.
+gsutil -m -h "Cache-Control:public, max-age=604800" cp -r . "gs://${IMAGES_BUCKET}/products/"
+```
+
+Safe to re-run if interrupted — `gsutil cp` overwrites by object name, so
+running it twice just re-uploads the same files to the same paths with no
+duplicates or errors.
+
+**Backend bucket + Cloud CDN + HTTPS load balancer.** Getting a real HTTPS
+cert normally means owning a domain — the trick below (`sslip.io`, a public
+service that resolves `<ip-with-dashes>.sslip.io` to that literal IP) gets a
+genuine Google-managed certificate without one:
+
+```bash
+# Backend bucket with CDN enabled
+gcloud compute backend-buckets create staples-images-backend \
+  --gcs-bucket-name="$IMAGES_BUCKET" --enable-cdn
+
+# Reserve a global static IP
+gcloud compute addresses create staples-images-ip --global
+export LB_IP=$(gcloud compute addresses describe staples-images-ip --global --format='value(address)')
+
+# Turn it into a hostname sslip.io will resolve back to that same IP
+export CDN_HOST="$(echo $LB_IP | tr '.' '-').sslip.io"
+
+# Google-managed SSL cert for that hostname
+gcloud compute ssl-certificates create staples-images-cert \
+  --domains="$CDN_HOST" --global
+
+# URL map -> backend bucket -> HTTPS proxy -> forwarding rule
+gcloud compute url-maps create staples-images-lb \
+  --default-backend-bucket=staples-images-backend
+gcloud compute target-https-proxies create staples-images-https-proxy \
+  --url-map=staples-images-lb --ssl-certificates=staples-images-cert
+gcloud compute forwarding-rules create staples-images-https-rule \
+  --address=staples-images-ip --global \
+  --target-https-proxy=staples-images-https-proxy --ports=443
+```
+
+**The managed cert takes 15–60 minutes to provision and validate** — this
+is normal Google-side behavior, not something stuck. Poll it rather than
+guessing when it's ready:
+
+```bash
+gcloud compute ssl-certificates describe staples-images-cert \
+  --global --format='value(managed.status)'
+# PROVISIONING -> ACTIVE
+```
+
+**Cut over only once it's `ACTIVE`** — verify the CDN actually serves an
+image (`curl -sI https://$CDN_HOST/products/<some-sku>.jpg`) before setting
+`IMAGES_BASE_URL=https://$CDN_HOST` anywhere real. Setting it while the cert
+is still provisioning would 302 every product image at a TLS handshake that
+isn't ready yet, breaking live images on an otherwise-working deployment.
+Once verified, set it as an env var on the Cloud Run service (either add
+`--set-env-vars=IMAGES_BASE_URL=https://$CDN_HOST` to the `gcloud run
+deploy` step in `cloudbuild.yaml` so it survives every future CI deploy, or
+apply it once with `gcloud run services update`).
+
+---
+
 ## Troubleshooting
 
 Every one of these actually happened during this project's deployment.
@@ -553,6 +654,16 @@ delete the errant service in the wrong region
 (`gcloud run services delete SERVICE_NAME --region=WRONG_REGION --quiet`) —
 it never had a working database connection, so there's nothing on it worth
 keeping.
+
+### `git clone` from Cloud Shell prompts for a GitHub username/password
+
+Cloud Shell has no stored GitHub credentials, and GitHub no longer accepts
+real account passwords for git operations over HTTPS (a Personal Access
+Token is required even if you have one). This isn't a Cloud Shell
+misconfiguration — it means the repo is **private**. Either make it public
+(Settings → Danger Zone → Change visibility — reasonable for a hackathon
+repo you want reviewable anyway) or clone with a PAT embedded in the URL:
+`git clone https://<token>@github.com/<you>/<repo>.git`.
 
 ### `torchvision::nms does not exist`
 
