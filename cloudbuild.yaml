@@ -32,6 +32,12 @@ steps:
   - 'staples-visual-search'
   - '--image=us-central1-docker.pkg.dev/$PROJECT_ID/staples-repo/staples-visual-search:$SHORT_SHA'
   - '--region=us-central1'
+  # One deliberate exception to the "don't re-specify flags" policy at the
+  # top of this file: this pins product images to the GCS/Cloud CDN origin
+  # set up in GCP_SETUP.md step 13 (verified ACTIVE + serving before this
+  # was added). --set-env-vars replaces the full env var list, but doesn't
+  # touch --set-secrets (DATABASE_URL is a secret, a separate namespace).
+  - '--set-env-vars=IMAGES_BASE_URL=https://34-110-248-3.sslip.io'
 
 images:
 - 'us-central1-docker.pkg.dev/$PROJECT_ID/staples-repo/staples-visual-search:$SHORT_SHA'
