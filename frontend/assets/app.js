@@ -536,6 +536,32 @@ function renderHeroSamples(mountId) {
   });
 }
 
+// Sample photos for "Shop the Room" — a real multi-item room photo and a
+// synthetic ground-truth composite (four distinct catalog products tiled
+// into one image, used during development to verify the tile-sweep found
+// all four correctly) — both known to produce a real multi-item result.
+const ROOM_SAMPLE_IMAGES = [
+  { file: "room-1.jpg", label: "Living room photo" },
+  { file: "room-2.jpg", label: "Furniture grid" },
+];
+
+function renderRoomSamples(mountId) {
+  const mount = document.getElementById(mountId);
+  if (!mount) return;
+  mount.innerHTML = ROOM_SAMPLE_IMAGES.map(({ file, label }) => `
+    <button class="hero-sample-thumb" data-file="${file}" title="Try &quot;${esc(label)}&quot; with Shop the Room">
+      <img src="/assets/room-samples/${file}" alt="${esc(label)}" loading="lazy" />
+    </button>`).join("");
+  mount.querySelectorAll(".hero-sample-thumb").forEach(btn => {
+    btn.addEventListener("click", async () => {
+      const file = btn.dataset.file;
+      const res = await fetch(`/assets/room-samples/${file}`);
+      const blob = await res.blob();
+      startShopTheRoom(new File([blob], file, { type: blob.type || "image/jpeg" }));
+    });
+  });
+}
+
 function wireVisualSearch(buttonId, inputId) {
   const btn = document.getElementById(buttonId);
   const input = document.getElementById(inputId);
