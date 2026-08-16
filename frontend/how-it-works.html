@@ -319,7 +319,7 @@
         <tbody>
           <tr><td><code>DATA_BACKEND=sql</code> — Cloud SQL + pgvector</td><td>✅ Live</td><td>This is what's actually deployed on Cloud Run today, not a future plan.</td></tr>
           <tr><td><code>EMBEDDING_BACKEND=clip</code> — local CLIP in the container</td><td>✅ Live</td><td>The model ships bundled in the image (~577MB) — no per-call network hop, no external API cost.</td></tr>
-          <tr><td><code>EMBEDDING_BACKEND=vertex</code> — Vertex AI Multimodal Embeddings</td><td>🔜 Not yet tested</td><td>The code path exists (same interface, swap one config value) but has never been benchmarked in production against local CLIP. Planned comparison: latency/cost tradeoff of an API call per query vs. a bundled model.</td></tr>
+          <tr><td><code>EMBEDDING_BACKEND=vertex</code> — Vertex AI Multimodal Embeddings</td><td>✅ Benchmarked — CLIP kept</td><td>300-product head-to-head: Vertex wins recall@1 (80.0% vs 72.7%) but CLIP ties/leads recall@5 (96.0% vs 95.0%) and recall@8 (98.0% vs 96.3%), at ~230ms/call local vs. ~650-1000ms/call over the network, for $0 marginal cost vs. ~$0.0001/image. Local CLIP stays in production.</td></tr>
           <tr><td>Product images from Cloud Storage + Cloud CDN</td><td>✅ Live</td><td>Fronted by a real HTTPS load balancer with a Google-managed cert (sslip.io host, no custom domain needed) — <code>/images/products/*</code> 302s from Cloud Run to the CDN.</td></tr>
           <tr><td>Vertex AI Vector Search</td><td>❌ Not planned at this scale</td><td>Would need an always-on index endpoint (real hourly cost) and take 30-60min to build an index — worse than pgvector for a ~10k-row catalog. Revisit past ~10M vectors.</td></tr>
         </tbody>

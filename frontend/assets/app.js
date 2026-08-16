@@ -95,6 +95,7 @@ const ICONS = {
   pin: `<svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M12 21s-6-5.3-6-10a6 6 0 0 1 12 0c0 4.7-6 10-6 10z"/><circle cx="12" cy="11" r="2.2"/></svg>`,
   user: `<svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="1.7"><circle cx="12" cy="8" r="3.5"/><path d="M4.5 20c1.5-4 4.5-6 7.5-6s6 2 7.5 6"/></svg>`,
   orders: `<svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M4 4h11l1 4H5"/><path d="M5 8v10a1 1 0 0 0 1 1h11a1 1 0 0 0 1-1V8"/><line x1="9" y1="12" x2="14" y2="12"/></svg>`,
+  scan: `<svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M4 4h4M4 4v4M20 4h-4M20 4v4M4 20h4M4 20v-4M20 20h-4M20 20v-4"/><rect x="9" y="9" width="6" height="6" rx="1"/></svg>`,
   cart: `<svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M3 4h2l2.4 12.4a2 2 0 0 0 2 1.6h7.2a2 2 0 0 0 2-1.6L20 8H6"/><circle cx="9.5" cy="20.5" r="1.2"/><circle cx="17" cy="20.5" r="1.2"/></svg>`,
   chevron: `<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2"><polyline points="6 9 12 15 18 9"/></svg>`,
 };
@@ -163,7 +164,7 @@ function renderSiteHeader() {
 
         <div class="account-icons">
           <a class="acct-link" href="#" title="Sign In">${ICONS.user}<span>Sign In</span></a>
-          <a class="acct-link" href="#" title="Orders">${ICONS.orders}<span>Orders</span></a>
+          <button class="acct-link" id="header-scan-btn" type="button" title="Scan to try">${ICONS.scan}<span>Scan to try</span></button>
           <a class="acct-link cart-btn" href="/cart.html" title="Cart" aria-label="Cart">
             ${ICONS.cart}<span>Cart</span>
             <span id="cart-count" class="cart-badge">${getCartCount()}</span>
@@ -187,6 +188,7 @@ function renderSiteHeader() {
 }
 
 function wireHeaderInteractions() {
+  document.getElementById("header-scan-btn")?.addEventListener("click", openScanModal);
   // Rotating promo message
   const promo = document.getElementById("promo-text");
   if (promo && PROMO_MESSAGES.length > 1) {
@@ -1226,7 +1228,26 @@ function buildScanModal() {
   modal.addEventListener("click", (e) => { if (e.target === modal) modal.hidden = true; });
 }
 
-function openScanModal() {
+let _qrLibLoading = null;
+
+// The QR header button lives on every page (wireHeaderInteractions), but the
+// qrcode.js vendor lib is only <script>-tagged on index.html — load it on
+// demand instead of adding the tag to every page in the site.
+function _loadQrLib() {
+  if (window.QRCode) return Promise.resolve();
+  if (_qrLibLoading) return _qrLibLoading;
+  _qrLibLoading = new Promise((resolve, reject) => {
+    const s = document.createElement("script");
+    s.src = "/assets/qrcode.js";
+    s.onload = resolve;
+    s.onerror = reject;
+    document.head.appendChild(s);
+  });
+  return _qrLibLoading;
+}
+
+async function openScanModal() {
+  await _loadQrLib();
   buildScanModal();
   const modal = document.getElementById("vs-scan-modal");
   const url = `${location.origin}/?mobilescan=1`;
@@ -1235,10 +1256,6 @@ function openScanModal() {
   new QRCode(qrEl, { text: url, width: 200, height: 200, correctLevel: QRCode.CorrectLevel.M });
   document.getElementById("vs-scan-url").textContent = url;
   modal.hidden = false;
-}
-
-function wireScanToggle(buttonId) {
-  document.getElementById(buttonId)?.addEventListener("click", openScanModal);
 }
 
 // Called on every page load (cheap no-op unless ?mobilescan=1 is present) —

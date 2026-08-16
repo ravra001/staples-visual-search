@@ -17,8 +17,8 @@
     <h1>Visual Search — Architecture</h1>
     <p>This app runs two ways: fully offline on a laptop (<code>DATA_BACKEND=memory</code>), or on Google
        Cloud — Cloud Run + Cloud SQL/pgvector — which is how it's <strong>actually deployed today</strong>,
-       not a future plan. The one piece genuinely still ahead: swapping local CLIP for Vertex AI Multimodal
-       Embeddings has never been tested or benchmarked in production (see the callout below).</p>
+       not a future plan. Vertex AI Multimodal Embeddings was benchmarked against local CLIP (see the
+       callout below) — local CLIP won on the metrics that matter for this app and stays in production.</p>
     <div class="arch-legend">
       <span><span class="dot dot-client"></span> Client</span>
       <span><span class="dot dot-app"></span> Application</span>
@@ -37,7 +37,7 @@
        <a href="/how-it-works.html">How It Works</a> for how each one reuses these steps.</p>
     <ol class="flow-strip">
       <li><span class="flow-num">1</span><b>Upload</b><span>User picks a photo; the browser POSTs it to <code>/api/visual-search</code> (validated + size-capped).</span></li>
-      <li><span class="flow-num">2</span><b>Embed</b><span>Image → normalized vector (local CLIP today; Vertex AI is a coded, untested alternative). Runs in a threadpool.</span></li>
+      <li><span class="flow-num">2</span><b>Embed</b><span>Image → normalized vector (local CLIP — benchmarked against Vertex AI and kept, see the callout below). Runs in a threadpool.</span></li>
       <li><span class="flow-num">3</span><b>Classify</b><span>Nearest-centroid → predicted category + confidence (the "Detected:" chip).</span></li>
       <li><span class="flow-num">4</span><b>Rank</b><span>Vector comparison (in-memory matmul, or a pgvector query) vs the catalog; scoped to the category when confident. Top 48.</span></li>
       <li><span class="flow-num">5</span><b>Hydrate</b><span>Batch-fetch product rows for the winning SKUs; attach the % match.</span></li>
@@ -96,7 +96,7 @@
           </div>
           <div class="flow-arrow">service calls</div>
           <div class="tier three">
-            <div class="node ml"><b>Local CLIP</b><small>bundled in the container image<br/>(577MB) — no per-query network hop<br/><em>Vertex AI: coded, not yet swapped in</em></small></div>
+            <div class="node ml"><b>Local CLIP</b><small>bundled in the container image<br/>(577MB) — no per-query network hop<br/><em>Vertex AI: benchmarked, CLIP kept (see callout)</em></small></div>
             <div class="node data"><b>Cloud SQL + pgvector</b><small>products table:<br/>row + embedding + image_embedding<br/>+ model_version, HNSW-indexed</small></div>
             <div class="node data"><b>GCS + Cloud CDN</b><small>product images, HTTPS load balancer + Google-managed cert (sslip.io hostname, no custom domain needed) — <code>IMAGES_BASE_URL</code> live</small></div>
           </div>
@@ -112,17 +112,29 @@
   <!-- ============ VERTEX AI CALLOUT ============ -->
   <section class="arch-section">
     <div class="doc-callout">
-      <h3>What's genuinely not done yet: Vertex AI Multimodal Embeddings</h3>
-      <p><code>embeddings.py</code> already has a working <code>vertex</code> backend (same interface as
-         local CLIP — swap one config value, <code>embedding.backend: vertex</code>) that calls Vertex AI's
+      <h3>Benchmarked: Vertex AI Multimodal Embeddings vs. local CLIP — CLIP stays</h3>
+      <p><code>embeddings.py</code> has a working <code>vertex</code> backend (same interface as local CLIP —
+         swap one config value, <code>embedding.backend: vertex</code>) that calls Vertex AI's
          <code>multimodalembedding@001</code> and produces a 1408-dim vector instead of CLIP's 512-dim one.
-         The rest of the pipeline is dimension-agnostic, so this genuinely is a config flip, not a rewrite.</p>
-      <p>What hasn't happened: it's never been run against production traffic, benchmarked for latency, or
-         compared for embedding quality against local CLIP. The real tradeoff to measure before switching —
-         an API call per query (network latency, per-call cost, but no 577MB model in the image and a much
-         faster cold start) versus a bundled model (larger image, slower cold start, but zero per-query
-         network dependency and zero marginal cost) — is a <strong>planned comparison, not a completed
-         migration</strong>. Don't read the "coded" status above as "evaluated."</p>
+         This was benchmarked head-to-head on a real 300-product sample (text→image recall@k, the same
+         held-out-query methodology used elsewhere in this repo's eval scripts), not just read about:</p>
+      <div class="table-scroll">
+        <table class="arch-table">
+          <thead><tr><th>Metric</th><th>Local CLIP</th><th>Vertex AI</th></tr></thead>
+          <tbody>
+            <tr><td>recall@1</td><td>72.7%</td><td><strong>80.0%</strong></td></tr>
+            <tr><td>recall@5</td><td><strong>96.0%</strong></td><td>95.0%</td></tr>
+            <tr><td>recall@8</td><td><strong>98.0%</strong></td><td>96.3%</td></tr>
+            <tr><td>Latency per call (steady state)</td><td><strong>~230ms</strong> (local, in-process)</td><td>~650-1000ms (network round trip)</td></tr>
+            <tr><td>Marginal cost per query</td><td><strong>$0</strong></td><td>~$0.0001/image</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p><strong>Verdict: kept local CLIP.</strong> Vertex wins recall@1, but this app surfaces a grid of
+         results, not one answer — recall@5/8 (where CLIP is tied or ahead) is the more representative number.
+         Switching would also mean every live search pays a ~3x latency hit and a per-query charge forever,
+         for a quality win concentrated in the least representative metric. Full numbers in
+         <code>backend/experimental/eval_vertex_vs_clip.py</code>.</p>
     </div>
   </section>
 
@@ -263,7 +275,7 @@
         <thead><tr><th>Concern</th><th>On-Prem / Local</th><th>Google Cloud (today)</th><th>Controlled by</th></tr></thead>
         <tbody>
           <tr><td>Compute</td><td>Uvicorn process</td><td>Cloud Run (container, autoscaled, min-instances=1)</td><td>deploy target</td></tr>
-          <tr><td>Embedding model</td><td>local CLIP</td><td>local CLIP (bundled in the image) — Vertex AI coded but untested</td><td><code>embedding.backend</code></td></tr>
+          <tr><td>Embedding model</td><td>local CLIP</td><td>local CLIP (bundled in the image) — Vertex AI benchmarked, CLIP won on recall@5/8 and latency</td><td><code>embedding.backend</code></td></tr>
           <tr><td>Product catalog</td><td>in-memory Python list</td><td>Cloud SQL + pgvector (row + vector, HNSW-indexed)</td><td><code>data.backend</code> + <code>database_url</code></td></tr>
           <tr><td>Product images</td><td>local filesystem</td><td>GCS + Cloud CDN — HTTPS load balancer, Google-managed cert, live</td><td>302 redirect to CDN (<code>IMAGES_BASE_URL</code>)</td></tr>
           <tr><td>Vector ranking</td><td>vectorized cosine (in-memory matrix)</td><td>pgvector similarity (SQL) — right choice at 10k rows, not a stopgap; Vertex Vector Search only worth it past ~10M vectors</td><td>catalog size</td></tr>
