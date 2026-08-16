@@ -529,11 +529,24 @@ function renderHeroSamples(mountId) {
     </button>`).join("");
   mount.querySelectorAll(".hero-sample-thumb").forEach(btn => {
     btn.addEventListener("click", async () => {
-      const sku = btn.dataset.sku;
-      const res = await fetch(`/images/products/${sku}.jpg`);
-      const blob = await res.blob();
-      const file = new File([blob], `${sku}.jpg`, { type: blob.type || "image/jpeg" });
-      startVisualSearch(file);
+      // When IMAGES_BASE_URL is set, this same-origin path 302s to the CDN
+      // (a different origin) -- fetch() enforces CORS on the FINAL response
+      // even across a same-origin-initiated redirect, so this throws if the
+      // CDN doesn't send Access-Control-Allow-Origin (a real GCS/Cloud CDN
+      // config gap, not a code bug -- see GCP_SETUP.md). Unlike the <img>
+      // thumbnail above (plain image loads don't enforce CORS), a bare fetch
+      // failure here used to be entirely silent. Surface it instead.
+      try {
+        const sku = btn.dataset.sku;
+        const res = await fetch(`/images/products/${sku}.jpg`);
+        if (!res.ok) throw new Error(`sample image request failed (${res.status})`);
+        const blob = await res.blob();
+        const file = new File([blob], `${sku}.jpg`, { type: blob.type || "image/jpeg" });
+        startVisualSearch(file);
+      } catch (e) {
+        console.error("Sample photo search failed:", e);
+        alert("Couldn't load that sample photo. Try uploading your own instead.");
+      }
     });
   });
 }
@@ -556,10 +569,16 @@ function renderRoomSamples(mountId) {
     </button>`).join("");
   mount.querySelectorAll(".hero-sample-thumb").forEach(btn => {
     btn.addEventListener("click", async () => {
-      const file = btn.dataset.file;
-      const res = await fetch(`/assets/room-samples/${file}`);
-      const blob = await res.blob();
-      startShopTheRoom(new File([blob], file, { type: blob.type || "image/jpeg" }));
+      try {
+        const file = btn.dataset.file;
+        const res = await fetch(`/assets/room-samples/${file}`);
+        if (!res.ok) throw new Error(`sample image request failed (${res.status})`);
+        const blob = await res.blob();
+        startShopTheRoom(new File([blob], file, { type: blob.type || "image/jpeg" }));
+      } catch (e) {
+        console.error("Sample room photo search failed:", e);
+        alert("Couldn't load that sample photo. Try uploading your own instead.");
+      }
     });
   });
 }
