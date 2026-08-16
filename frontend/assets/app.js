@@ -426,6 +426,26 @@ async function renderProductRail(elId, { category, limit = 12, offset = 0 } = {}
 // vector (see /api/products/{sku}/similar). maxPrice, if given, filters to
 // strictly-cheaper visually-similar items ("similar for less"); the whole
 // section is removed (not left empty) if nothing qualifies.
+// "Complete the look" — coordinated items from OTHER categories for this
+// product (the lamp/rug/side-table that goes with this chair), not more of
+// the same thing. See /api/products/{sku}/complete-the-look in main.py.
+async function renderCompleteLookRail(elId, sku) {
+  const el = document.getElementById(elId);
+  if (!el) return;
+  el.innerHTML = `<div class="state-msg"><div class="spinner"></div>Loading…</div>`;
+  try {
+    const res = await fetch(`${API_BASE}/api/products/${encodeURIComponent(sku)}/complete-the-look`);
+    if (!res.ok) throw new Error("Could not load complete-the-look items");
+    const data = await res.json();
+    const items = data.items || [];
+    if (!items.length) { el.closest("section")?.remove(); return; }
+    el.innerHTML = items.map(p => productCardHTML(p)).join("");
+    wireProductCardInteractions(el);
+  } catch (e) {
+    el.closest("section")?.remove();
+  }
+}
+
 async function renderSimilarRail(elId, sku, { maxPrice, limit = 12 } = {}) {
   const el = document.getElementById(elId);
   if (!el) return;
@@ -551,13 +571,17 @@ function renderHeroSamples(mountId) {
   });
 }
 
-// Sample photos for "Shop the Room" — a real multi-item room photo and a
-// synthetic ground-truth composite (four distinct catalog products tiled
-// into one image, used during development to verify the tile-sweep found
-// all four correctly) — both known to produce a real multi-item result.
+// Sample photos for "Shop the Room" — a real multi-item room photo and two
+// synthetic ground-truth composites (real catalog product photos tiled into
+// one image, used during development to verify the tile-sweep found each one
+// correctly): a furniture grid, and an office/breakroom supply-shelf grid
+// (paper cups, ink cartridge, dustpan, coffee) for the B2B replenishment
+// framing — same feature, same code, a facilities-reorder photo instead of
+// a living room. All three are known to produce a real multi-item result.
 const ROOM_SAMPLE_IMAGES = [
   { file: "room-1.jpg", label: "Living room photo" },
   { file: "room-2.jpg", label: "Furniture grid" },
+  { file: "breakroom-1.jpg", label: "Breakroom & supply shelf" },
 ];
 
 function renderRoomSamples(mountId) {
@@ -1508,9 +1532,11 @@ async function renderProductDetail(elId) {
       setTimeout(() => { addBtn.textContent = "Add to Cart"; addBtn.classList.remove("added"); }, 1200);
     });
 
-    // "You may also like" — real visual similarity (this product's own
-    // vector), not just same-category. "Similar for less" reuses the same
-    // neighborhood, filtered to strictly cheaper items.
+    // "Complete the look" — coordinated items from OTHER categories (cross-
+    // sell). "You may also like" is real visual similarity within the SAME
+    // neighborhood (this product's own vector); "Similar for less" reuses
+    // that neighborhood, filtered to strictly cheaper items.
+    renderCompleteLookRail("complete-look-rail", p.sku);
     renderSimilarRail("related-rail", p.sku);
     renderSimilarRail("cheaper-rail", p.sku, { maxPrice: p.price });
   } catch (e) {

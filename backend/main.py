@@ -592,6 +592,72 @@ def similar_products(sku: str, top_k: int = 12, refine_text: str = ""):
     return {"count": len(results), "items": results, "refine_text": refine_text or None}
 
 
+COMPLETE_LOOK_MAX_ITEMS = 4   # a cross-sell rail reads best small and tight — a few
+                               # coordinated items, not a full category dump
+
+
+def _do_complete_the_look(sku, max_items=COMPLETE_LOOK_MAX_ITEMS):
+    """"Complete the look": given ONE product, find the single best-matching
+    item in each OTHER category — so a strongly-styled product (rattan
+    chair, mid-century walnut desk) surfaces a visually coherent set to pair
+    it with, e.g. the lamp/rug/side-table that goes with it. One match per
+    CATEGORY, not "customers also bought" and not per-tile like Shop the
+    Room — this is the same per-category search Shop the Room already uses
+    (_search_matches restricted to a category, top_k=1), just looped over
+    the catalog's own category list instead of image tiles, starting from
+    one product's already-stored vector (_get_pure_image_vector) instead of
+    re-embedding a photo. No new model, no new index.
+
+    Deliberately does NOT apply MATCH_THRESHOLD here: that gate is
+    calibrated for "is this the same object as the query" (same-category
+    identification), and a chair's vector is structurally farther from a
+    lamp's than from another chair's even when they're a genuinely
+    coordinated pair — gating on that score would empty out most
+    categories rather than surface real style-coherence. Top-1-per-category
+    is itself already a strong filter (the single closest thing available),
+    so nothing here is unfiltered.
+
+    Returns None if sku is unknown, else [(sku, score), ...] sorted best
+    first, excluding the source product's own category.
+    """
+    qn = _get_pure_image_vector(sku)
+    if qn is None:
+        return None
+    source = get_product_by_sku(sku)
+    source_category = source["category"] if source else None
+
+    categories = sql_repo.get_categories() if DATA_BACKEND == "sql" else sorted({p["category"] for p in get_all_products()})
+    results = []
+    for category in categories:
+        if category == source_category:
+            continue
+        matches = _search_matches(qn, None, category, 1)
+        if matches:
+            results.append(matches[0])
+
+    results.sort(key=lambda t: -t[1])
+    return results[:max_items]
+
+
+@app.get("/api/products/{sku}/complete-the-look")
+def complete_the_look(sku: str, max_items: int = COMPLETE_LOOK_MAX_ITEMS):
+    """Cross-sell rail: coordinated items from OTHER categories for a given
+    product — see _do_complete_the_look."""
+    max_items = max(1, min(int(max_items), 12))
+    matches = _do_complete_the_look(sku, max_items)
+    if matches is None:
+        raise HTTPException(404, "Product not found")
+    by_sku = get_products_by_skus([s for s, _ in matches])
+    results = []
+    for s, score in matches:
+        p = by_sku.get(s)
+        if p:
+            item = _serialize(p)
+            item["match_score"] = round(score * 100, 1)
+            results.append(item)
+    return {"count": len(results), "items": results}
+
+
 SHOP_ROOM_GRID = 2          # NxN tile sweep of the uploaded photo — kept small
                             # (5 embed+search calls total: whole image + 4
                             # tiles) since DATA_BACKEND=sql pays one network
