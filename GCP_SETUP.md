@@ -413,7 +413,21 @@ a browser OAuth flow; there's no clean CLI-only path for the initial
 connection.
 
 **Create the trigger**: event = push to branch `^main$`, configuration =
-"Cloud Build configuration file", location = `/cloudbuild.yaml`.
+**"Cloud Build configuration file (YAML or JSON)"**, location = `/cloudbuild.yaml`.
+
+⚠️ **Do not pick "Autodetected" / "Dockerfile" here**, even though it looks
+like the simpler option and the console may suggest it first. That path
+skips this repo's `cloudbuild.yaml` entirely and instead deploys through its
+own wizard, which creates or updates a Cloud Run service using its own
+defaults — a different region than the rest of your infrastructure, the
+project's *default* Compute Engine service account (not the one IAM was
+configured for in step 3), and none of the Cloud SQL connection, secrets,
+or scaling flags from step 10. See
+[Trigger silently deployed a second, broken service](#trigger-silently-deployed-a-second-broken-service)
+below for exactly what this looks like when it happens, and how to confirm
+which configuration a trigger is actually using
+(`gcloud builds triggers list --format="table(name,filename)"` — an empty
+`filename` column means it's on the wizard path, not your `cloudbuild.yaml`).
 
 From then on, `git push origin main` is the entire deploy process.
 
@@ -475,17 +489,70 @@ a missing model file.
 
 Fix: stage the model in GCS once (console.cloud.google.com/storage — a
 browser upload sidesteps local `gcloud`/`gsutil` auth entirely, which is
-useful given the TLS issue above), then add a step to `cloudbuild.yaml` that
-rsyncs it into the build context before `docker build` runs:
+useful given the TLS issue above), then add steps to `cloudbuild.yaml` that
+fetch it into the build context before `docker build` runs.
+
+**Upload it as a single zip, not a folder.** The GCS console's folder-upload
+UI silently dropped files on the first attempt at staging
+`backend/models/hf/` directly (thousands of small HuggingFace cache files) —
+`gsutil ls -r` on the result came back completely empty with no error
+anywhere, and a `gsutil rsync` step pointed at that empty prefix "succeeds"
+(copies zero files) rather than failing, so the build sails on to `docker
+build` and fails at the exact same spot for what looks like the same reason.
+Zip the model locally, upload that one file, and unzip it in the build
+(`gsutil`'s cloud-builder image doesn't reliably have `unzip`, hence the
+plain Python step):
 
 ```yaml
 - name: 'gcr.io/cloud-builders/gsutil'
-  args: ['-m', 'rsync', '-r', 'gs://BUCKET/model-cache/hf', 'backend/models/hf']
+  args: ['cp', 'gs://BUCKET/model-cache/hf_model.zip', 'hf_model.zip']
+- name: 'python:3.11-slim'
+  entrypoint: 'python'
+  args: ['-c', "import zipfile; zipfile.ZipFile('hf_model.zip').extractall('backend/models')"]
 ```
 
 Grant Cloud Build's service account read access to that bucket (see step 12
 above) — a silent permission failure on this step looks identical to the
-model just not being there.
+model just not being there. After uploading, always verify with `gsutil ls
+-lh gs://BUCKET/model-cache/hf_model.zip` that the size matches the local
+file exactly before assuming the upload actually finished.
+
+### Trigger silently deployed a second, broken service
+
+Same generic error as above (`container failed to start ... within the
+allocated timeout`), completely different cause, and easy to mis-diagnose
+as a repeat of the missing-model issue since the symptom is identical.
+
+When creating the trigger in step 12, the Cloud Build console offers an
+**"Autodetected" / Dockerfile** configuration option alongside "Cloud Build
+configuration file" — and may even suggest it as the default. Picking it
+does not use this repo's `cloudbuild.yaml` at all. Instead it deploys
+through its own wizard, using its own defaults: a **different region** than
+the rest of the project's infrastructure, the project's **default Compute
+Engine service account** (`PROJECT_NUMBER-compute@developer.gserviceaccount.com`)
+instead of the one IAM was configured for, and **none** of the Cloud SQL
+connection, secrets, or `--min-instances`/`--concurrency` tuning from step
+10. The result is a second Cloud Run service — same name, different region
+— that has no way to reach the database and hangs on startup until the
+health check times out.
+
+Diagnose it directly rather than guessing:
+
+```bash
+# Does a service with the same name exist in an unexpected region?
+gcloud run services list --region=us-east1   # or wherever it landed
+
+# Is the trigger actually using cloudbuild.yaml? An empty filename column
+# means no -- it's on the wizard path.
+gcloud builds triggers list --format="table(name,filename)"
+```
+
+Fix: edit the trigger, change its configuration to "Cloud Build
+configuration file (YAML or JSON)" pointing at `/cloudbuild.yaml`, then
+delete the errant service in the wrong region
+(`gcloud run services delete SERVICE_NAME --region=WRONG_REGION --quiet`) —
+it never had a working database connection, so there's nothing on it worth
+keeping.
 
 ### `torchvision::nms does not exist`
 
