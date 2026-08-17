@@ -1411,7 +1411,35 @@ function renderMobileScanLanding() {
 // how-it-works.html for why the bundle case is the one genuinely new
 // action worth adding here.
 let _agentModalBuilt = false;
-let _agentHistory = []; // [{role: "user"|"model", text}] -- kept in memory only, resets on page load
+let _agentHistory = []; // [{role: "user"|"model", text}] -- sent to the API as conversation context
+// Mirrors what's rendered in the chat panel -- persisted to sessionStorage
+// (see _saveAgentSession/_loadAgentSession) so the conversation survives
+// navigating to a different page of this multi-page site, not just a
+// re-render on the same page. Cleared when the tab closes (sessionStorage's
+// own lifecycle), same as "for this browsing session" implies.
+let _agentTranscript = [];
+const AGENT_SESSION_KEY = "vsAgentSession";
+
+function _saveAgentSession() {
+  try {
+    sessionStorage.setItem(AGENT_SESSION_KEY, JSON.stringify({
+      v: 1, history: _agentHistory, lastItems: _agentLastItems, transcript: _agentTranscript,
+    }));
+  } catch (e) {
+    /* storage full/unavailable (private browsing etc) -- chat still works, just won't persist */
+  }
+}
+
+function _loadAgentSession() {
+  try {
+    const raw = sessionStorage.getItem(AGENT_SESSION_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    return (parsed && parsed.v === 1) ? parsed : null;
+  } catch (e) {
+    return null;   // corrupt JSON -- treat as no saved session
+  }
+}
 // Whatever product cards are currently rendered in the chat panel -- resent
 // with every follow-up so the backend can fold a "here's what's on screen"
 // note into the model's context (see _build_screen_context in main.py).
@@ -1451,13 +1479,7 @@ function buildAgentModal() {
         <h3>Staples AI</h3>
         <button id="vs-agent-close" type="button" aria-label="Close">&times;</button>
       </div>
-      <div class="vs-agent-messages" id="vs-agent-messages">
-        <div class="vs-agent-msg vs-agent-msg-model">
-          Hi! Ask me to find a product, or try something like
-          <em>"set up an office for 15 people under $5000"</em>. You can also attach a
-          photo of a room to furnish, or a photo of a shopping list.
-        </div>
-      </div>
+      <div class="vs-agent-messages" id="vs-agent-messages"></div>
       <div id="vs-agent-image-preview" class="vs-agent-image-preview" hidden>
         <img id="vs-agent-image-preview-img" alt="Attached photo" />
         <button id="vs-agent-image-remove" type="button" aria-label="Remove photo">&times;</button>
@@ -1472,6 +1494,19 @@ function buildAgentModal() {
   document.body.appendChild(modal);
   modal.querySelector("#vs-agent-close").addEventListener("click", () => { modal.hidden = true; });
   modal.addEventListener("click", (e) => { if (e.target === modal) modal.hidden = true; });
+
+  const saved = _loadAgentSession();
+  if (saved && saved.transcript && saved.transcript.length) {
+    _agentHistory = saved.history || [];
+    _agentLastItems = saved.lastItems || [];
+    _agentTranscript = saved.transcript;
+    _agentTranscript.forEach(_renderAgentEntry);
+  } else {
+    _appendAgentMessage("model",
+      `Hi! Ask me to find a product, or try something like
+       <em>"set up an office for 15 people under $5000"</em>. You can also attach a
+       photo of a room to furnish, or a photo of a shopping list.`);
+  }
 
   const imageInput = modal.querySelector("#vs-agent-image-input");
   modal.querySelector("#vs-agent-attach-btn").addEventListener("click", () => imageInput.click());
@@ -1531,9 +1566,72 @@ function _appendAgentMessage(role, html) {
   return div;
 }
 
+// Renders one API response's reply/items/bundle into an existing message
+// div AND wires its interactive bits (product cards, the bundle "Add all"
+// button). Shared by the live send path and session-restore replay so a
+// restored bundle button still actually works, not just looks right.
+function _renderAgentReplyInto(div, data) {
+  let html = `<p>${esc(data.reply || "")}</p>`;
+  if (data.degraded) {
+    html += `<p class="vs-agent-degraded">Staples AI is unavailable right now — showing plain search results instead.</p>`;
+  }
+  if (data.bundle && data.bundle.unmatched && data.bundle.unmatched.length) {
+    html += `<p class="vs-agent-degraded">Couldn't find a match for: ${esc(data.bundle.unmatched.join(", "))}</p>`;
+  }
+  if (data.items && data.items.length) {
+    html += `<div class="vs-agent-cards">${data.items.map(p => productCardHTML(p)).join("")}</div>`;
+  }
+  if (data.bundle && data.bundle.feasible) {
+    html += `<button class="vs-agent-add-bundle" type="button">Add all to cart — $${data.bundle.total.toFixed(2)}</button>`;
+  }
+  div.innerHTML = html;
+  wireProductCardInteractions(div);
+
+  const bundleBtn = div.querySelector(".vs-agent-add-bundle");
+  if (bundleBtn) {
+    bundleBtn.addEventListener("click", () => {
+      const b = data.bundle;
+      if (b.items) {
+        // plan_room_setup / match_shopping_list shape: a flat `items`
+        // list, one entry each -- requested_qty is set by
+        // match_shopping_list (defaults to 1 for plan_room_setup items,
+        // which don't carry it).
+        b.items.forEach(item => addToCart(item.sku, item.requested_qty || 1));
+      } else {
+        // plan_office_setup shape: N desks + N chairs for the headcount,
+        // one shared item.
+        addToCart(b.desk.sku, b.people_count);
+        addToCart(b.chair.sku, b.people_count);
+        if (b.shared_item) addToCart(b.shared_item.sku, 1);
+      }
+      bundleBtn.textContent = "Added ✓";
+      bundleBtn.disabled = true;
+    });
+  }
+}
+
+// Replays one persisted transcript entry (see sendAgentMessage) into the
+// message list on session restore.
+function _renderAgentEntry(entry) {
+  if (entry.role === "user") {
+    // The actual photo bytes are deliberately NOT persisted (could be
+    // several MB each, easily blowing sessionStorage's quota over a long
+    // conversation) -- just a note that one was attached.
+    const note = entry.hadImage ? `<p class="vs-agent-photo-note">📷 photo attached</p>` : "";
+    _appendAgentMessage("user", note + (entry.text ? `<p>${esc(entry.text)}</p>` : ""));
+    return;
+  }
+  if (entry.kind === "error") {
+    _appendAgentMessage("model", `<p>${esc(entry.text)}</p>`);
+    return;
+  }
+  _renderAgentReplyInto(_appendAgentMessage("model", ""), entry.data);
+}
+
 async function sendAgentMessage(text, image = null) {
   const imgThumb = image ? `<img class="vs-agent-msg-thumb" src="${image.dataUrl}" alt="Attached photo" />` : "";
   _appendAgentMessage("user", imgThumb + (text ? `<p>${esc(text)}</p>` : ""));
+  _agentTranscript.push({ role: "user", text, hadImage: !!image });
   const pending = _appendAgentMessage("model", `<div class="spinner"></div>`);
 
   try {
@@ -1559,45 +1657,14 @@ async function sendAgentMessage(text, image = null) {
       { sku: p.sku, name: p.name, price: p.price, category: p.category }
     )));
 
-    let html = `<p>${esc(data.reply || "")}</p>`;
-    if (data.degraded) {
-      html += `<p class="vs-agent-degraded">Staples AI is unavailable right now — showing plain search results instead.</p>`;
-    }
-    if (data.bundle && data.bundle.unmatched && data.bundle.unmatched.length) {
-      html += `<p class="vs-agent-degraded">Couldn't find a match for: ${esc(data.bundle.unmatched.join(", "))}</p>`;
-    }
-    if (data.items && data.items.length) {
-      html += `<div class="vs-agent-cards">${data.items.map(p => productCardHTML(p)).join("")}</div>`;
-    }
-    if (data.bundle && data.bundle.feasible) {
-      html += `<button class="vs-agent-add-bundle" type="button">Add all to cart — $${data.bundle.total.toFixed(2)}</button>`;
-    }
-    pending.innerHTML = html;
-    wireProductCardInteractions(pending);
-
-    const bundleBtn = pending.querySelector(".vs-agent-add-bundle");
-    if (bundleBtn) {
-      bundleBtn.addEventListener("click", () => {
-        const b = data.bundle;
-        if (b.items) {
-          // plan_room_setup / match_shopping_list shape: a flat `items`
-          // list, one entry each -- requested_qty is set by
-          // match_shopping_list (defaults to 1 for plan_room_setup items,
-          // which don't carry it).
-          b.items.forEach(item => addToCart(item.sku, item.requested_qty || 1));
-        } else {
-          // plan_office_setup shape: N desks + N chairs for the headcount,
-          // one shared item.
-          addToCart(b.desk.sku, b.people_count);
-          addToCart(b.chair.sku, b.people_count);
-          if (b.shared_item) addToCart(b.shared_item.sku, 1);
-        }
-        bundleBtn.textContent = "Added ✓";
-        bundleBtn.disabled = true;
-      });
-    }
+    _renderAgentReplyInto(pending, data);
+    _agentTranscript.push({ role: "model", kind: "data", data });
+    _saveAgentSession();
   } catch (e) {
-    pending.innerHTML = `<p>${esc(e.message || "Something went wrong. Please try again.")}</p>`;
+    const msg = e.message || "Something went wrong. Please try again.";
+    pending.innerHTML = `<p>${esc(msg)}</p>`;
+    _agentTranscript.push({ role: "model", kind: "error", text: msg });
+    _saveAgentSession();
   }
 }
 

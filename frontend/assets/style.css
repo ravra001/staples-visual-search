@@ -821,6 +821,7 @@ a { color: inherit; text-decoration: none; }
 }
 #vs-agent-image-remove:hover { color: var(--staples-red); }
 .vs-agent-msg-thumb { display: block; width: 100%; max-width: 160px; max-height: 160px; object-fit: cover; border-radius: 10px; margin-bottom: 6px; }
+.vs-agent-photo-note { font-size: 12px; opacity: 0.85; margin: 0 0 4px; }
 
 /* Global drag-to-search overlay (see wireGlobalImageDrop in app.js) */
 body.vs-dragging::after {
