@@ -839,3 +839,69 @@ arguments` on current `gcloud` versions — `SOURCE` is a positional argument:
 `--config=~/cloudbuild.yaml` is passed to `gcloud` literally (bash only
 tilde-expands at the start of a word, not after `=` inside one). Use
 `--config=$HOME/cloudbuild.yaml` instead.
+
+### CDN serves a shorter cache TTL than the objects were uploaded with
+
+Product images were uploaded to GCS with `Cache-Control: public,
+max-age=604800` (step 13), but `curl -sI` against the live CDN host showed
+`max-age=3600` instead. Root cause: `backend-buckets create --enable-cdn`
+was run with no explicit TTL flags, so Cloud CDN falls back to its own
+default `client-ttl` (3600s) — which caps what Cloud CDN actually
+*advertises* to browsers, independent of the `Cache-Control` header already
+sitting on the GCS objects. Fix:
+
+```bash
+gcloud compute backend-buckets update staples-images-backend \
+  --cache-mode=CACHE_ALL_STATIC \
+  --client-ttl=604800 \
+  --default-ttl=604800 \
+  --max-ttl=604800
+
+# Without this, already-cached objects keep serving the old TTL until they
+# naturally expire — the flag change alone doesn't touch what's already cached.
+gcloud compute url-maps invalidate-cdn-cache staples-images-lb --path "/products/*"
+```
+
+### Hero sample photos silently do nothing (works locally, fails once `IMAGES_BASE_URL` is set)
+
+Symptom: clicking a "No photo handy?" sample thumbnail does nothing — no
+error, no navigation. Shop the Room's samples are unaffected. Root cause:
+the hero-sample click handler `fetch()`es the same-origin
+`/images/products/{sku}.jpg` to get the image bytes before running a
+search. Once `IMAGES_BASE_URL` is set, that path 302s to the CDN — a
+*different origin* — and `fetch()` enforces CORS on the final response even
+across a same-origin-initiated redirect. GCS objects don't send
+`Access-Control-Allow-Origin` by default, so the fetch throws with no
+visible symptom (an `<img>` tag loading the same URL works fine regardless,
+since plain image loads don't enforce CORS — that's why this is easy to
+miss in a quick visual check). Fix:
+
+```bash
+cat > /tmp/cors.json <<'EOF'
+[
+  {
+    "origin": ["*"],
+    "method": ["GET", "HEAD"],
+    "responseHeader": ["Content-Type"],
+    "maxAgeSeconds": 3600
+  }
+]
+EOF
+
+gsutil cors set /tmp/cors.json gs://${IMAGES_BUCKET}
+gsutil cors get gs://${IMAGES_BUCKET}   # verify it took
+
+# Same caveat as the TTL fix above -- purge whatever the CDN already
+# cached from before CORS was configured, or the fix won't be visible
+# until those entries naturally expire.
+gcloud compute url-maps invalidate-cdn-cache staples-images-lb --path "/products/*"
+
+# Confirm the CDN itself (not just GCS) is actually returning the header:
+curl -sI -H "Origin: https://<your-cloud-run-url>" \
+  https://$CDN_HOST/products/<some-sku>.jpg | grep -i access-control
+```
+
+The app-side code was also hardened regardless of this fix (both the hero
+and Shop the Room sample handlers now catch and surface fetch failures
+instead of failing silently) — see `app.js`'s `renderHeroSamples` /
+`renderRoomSamples`.

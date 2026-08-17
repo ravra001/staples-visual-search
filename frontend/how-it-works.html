@@ -17,8 +17,8 @@
     <h1>How search-by-photo works</h1>
     <p>From a user's uploaded photo to ranked products — how the catalog is stored, how images become
        vectors, how similarity is computed across 10,000 products, and how the newer features (text
-       refinement, Find Similar, Shop the Room) reuse the exact same machinery instead of bolting on
-       separate code paths.</p>
+       refinement, Find Similar, Complete the Look, Shop the Room, hybrid text search) reuse the exact same
+       machinery instead of bolting on separate code paths.</p>
   </header>
 
   <!-- ============ CORE IDEA ============ -->
@@ -240,6 +240,43 @@
     </div>
   </section>
 
+  <!-- ============ HYBRID TEXT SEARCH ============ -->
+  <section class="arch-section">
+    <h2>Hybrid text search — the header search bar, not a photo at all</h2>
+    <p class="arch-lead">Every feature above starts from an image. The plain keyword search bar historically
+       didn't — <code>/api/search</code> was AND-across-terms substring matching, ordered alphabetically by
+       SKU. That meant two real problems, not one: a query missing even one term from a sparse product
+       description returned zero results, and results that <em>did</em> match weren't ranked by relevance at
+       all.</p>
+    <div class="doc-callout">
+      <h3>Two rankings, fused — not one score replacing the other</h3>
+      <p>The fix adds a second ranking: the query text is embedded with CLIP's <em>text</em> tower (the same
+         tower Phase 1 uses to fuse catalog vectors, and refinement uses on the query side) and compared
+         against the catalog's <strong>fused</strong> vectors — not pure-image ones. With text-fusion
+         enabled, those vectors are already ~70% each product's own name/brand/description, so a text query
+         against them is a strong signal, not a stretch. "Something to print with" finds ink cartridges with
+         zero literal word overlap.</p>
+      <p>The two rankings — keyword-match order and semantic-cosine order — are combined with
+         <strong>Reciprocal Rank Fusion</strong> (each list contributes <code>1/(60+rank)</code> per sku it
+         contains) rather than blending their scores as numbers. That's deliberate: LIKE-matching has no
+         continuous score at all, and CLIP text-image cosines aren't calibrated against keyword-match
+         strength, so treating them as comparable quantities would be meaningless. A product ranked near the
+         top of either list — or both — rises to the top of the fused result, and each result is tagged
+         <code>keyword</code>, <code>semantic</code>, or <code>both</code> so the "why did this show up" badge
+         on the card is honest about which signal found it.</p>
+      <p>The keyword side itself also got a real fix, independent of semantic search: it's now ordered by
+         how many terms matched in the product <strong>name</strong> specifically (a name hit is a much
+         stronger relevance signal than the same term buried in the description), instead of arbitrary SKU
+         order.</p>
+      <p><b>No confidence floor, on purpose.</b> Semantic search never returns zero — even gibberish gets
+         "closest" matches. Checked empirically before deciding what to do about it: cosine scores for
+         genuinely good queries (0.60-0.69 on this catalog/model) directly overlap pure-gibberish scores
+         (0.54-0.62), so a fixed cutoff would either let garbage through or filter out real matches (a
+         "stapler" query's own second-best real hit scores only 0.594). The honest fix is the
+         keyword/semantic/both label itself — lower-confidence labeling, not a fake-precision threshold.</p>
+    </div>
+  </section>
+
   <!-- ============ FIND SIMILAR ============ -->
   <section class="arch-section">
     <h2>Find Similar — query FROM the catalog, not a fresh upload</h2>
@@ -249,6 +286,21 @@
        product's pure-image vector and runs it through the identical rank/refine machinery a photo upload
        uses. This is also why enabling text refinement here ("find similar, but in black") was a small
        change, not a new feature — the refinement code never cared where the query vector came from.</p>
+    <div class="doc-callout">
+      <h3>Complete the Look — the same lookup, restricted to OTHER categories</h3>
+      <p><code>GET /api/products/{sku}/complete-the-look</code> reuses that exact same stored-vector lookup,
+         but instead of ranking the whole catalog and returning the top matches (which would mostly be more
+         of the same category), it loops the catalog's own category list and keeps only the single best match
+         <em>per category other than the source item's own</em> — the same per-category search Shop the Room
+         already runs on its tiles, just pointed at one stored vector instead of a room photo's crops. A
+         strongly-styled product (a rattan chair, a mid-century walnut desk) surfaces the lamp, rug, and side
+         table that actually coordinate with it, instead of six more chairs.</p>
+      <p>Deliberately skips the usual match-threshold gate: that threshold is calibrated for "is this the
+         same object as the query" (same-category identification), and a chair's vector sits structurally
+         farther from a lamp's than from another chair's even when the pair is a genuinely good style match —
+         gating on that score would empty out most categories rather than surface real coherence. Top-1-per-
+         category is already a strong filter on its own.</p>
+    </div>
   </section>
 
   <!-- ============ SHOP THE ROOM ============ -->
@@ -275,6 +327,12 @@
       <li>If two tiles land on the same category, only the higher-scoring one survives. Results are capped
           at 6 distinct categories, sorted by score.</li>
     </ol>
+    <p class="arch-lead"><b>Same feature, two framings, zero code differences:</b> pointed at a living room
+       photo this furnishes a space; pointed at a desk or supply-shelf photo (paper cups, ink cartridges,
+       cleaning supplies — real categories already in the ABO catalog), it becomes a B2B replenishment
+       tool — photograph what's running low, get a cart-ready reorder. Verified end-to-end with a real
+       composite supply-shelf photo: 3 of 4 items detected at 83-90% confidence, correctly categorized as
+       Cleaning Supplies / Kitchen &amp; Breakroom / Office Supplies.</p>
   </section>
 
   <!-- ============ CROP TO SEARCH ============ -->
@@ -290,6 +348,20 @@
        (not raw mouse events) drive the drag, so this works with touch on a tablet as well as a mouse.</p>
   </section>
 
+  <!-- ============ QR + MOBILE CAPTURE ============ -->
+  <section class="arch-section">
+    <h2>QR + mobile capture — same pipeline, a different camera</h2>
+    <p class="arch-lead">A "Scan to try" button in the header renders a QR code (generated client-side, no
+       external service) pointing back at the app with <code>?mobilescan=1</code>. Scanning it on a phone
+       replaces the page with a single full-screen camera button — tapping it opens the phone's camera
+       directly (<code>capture="environment"</code>), and the captured photo is handed to the exact same
+       <code>startVisualSearch</code> flow a desktop file upload uses. No new backend endpoint, no separate
+       mobile app: the phone's camera is just another way to produce the bytes Phase 3 already knows what to
+       do with. The one real engineering wrinkle was the cross-page handoff — a real phone photo (3-6MB) can
+       exceed <code>sessionStorage</code>'s browser quota, which silently dropped the query before a fix
+       downscaled the image client-side first.</p>
+  </section>
+
   <!-- ============ RECAP ============ -->
   <section class="arch-section">
     <h2>One line per stage</h2>
@@ -303,6 +375,9 @@
           <tr><td>Query</td><td>Embed the photo (or reuse a stored product's vector, or a room-photo tile) → classify → rank 48 candidates → look up products → return.</td></tr>
           <tr><td>Refine</td><td>Blend in a CLIP text embedding, reranking only a pool of already-relevant candidates — never a fresh whole-catalog search.</td></tr>
           <tr><td>Price intent</td><td>Sorted/filtered client-side over the already-fetched results — never sent through CLIP.</td></tr>
+          <tr><td>Hybrid text search</td><td>Keyword LIKE-match and CLIP-text-vs-fused-vector semantic ranking, combined via Reciprocal Rank Fusion — no shared score to blend, so ranks fuse instead of numbers.</td></tr>
+          <tr><td>Complete the Look</td><td>One stored vector → best match per OTHER category (not the source item's own), reusing Shop the Room's per-category search with no match-threshold gate.</td></tr>
+          <tr><td>QR + mobile capture</td><td>Client-side QR code → phone camera → same startVisualSearch upload flow as desktop, downscaled first so the cross-page handoff can't exceed sessionStorage's quota.</td></tr>
         </tbody>
       </table>
     </div>

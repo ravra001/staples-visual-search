@@ -62,7 +62,7 @@
           </div>
           <div class="flow-arrow">HTTP · localhost:8000</div>
           <div class="tier">
-            <div class="node app wide"><b>FastAPI + Uvicorn</b><small>single process — serves static frontend <em>and</em> JSON API<br/>/api/products · /api/search · /api/visual-search · /api/products/{sku}/similar · /api/shop-the-room</small></div>
+            <div class="node app wide"><b>FastAPI + Uvicorn</b><small>single process — serves static frontend <em>and</em> JSON API<br/>/api/products · /api/search (hybrid keyword+semantic) · /api/visual-search · /api/products/{sku}/similar · /api/products/{sku}/complete-the-look · /api/shop-the-room</small></div>
           </div>
           <div class="flow-arrow">in-process calls</div>
           <div class="tier three">
@@ -260,6 +260,15 @@
         <p>This network's TLS-intercepting proxy issues a root CA that OpenSSL 3.x strictly rejects — no
            client-side config fixes it. Cloud Shell (browser-based, already authenticated) is the reliable
            path for this environment; documented so it isn't re-discovered the hard way twice.</p>
+      </div>
+      <div class="note-card">
+        <h4>Cross-origin CDN fetch, silently failing</h4>
+        <p>Sample-photo buttons worked locally but did nothing once the CDN went live — a same-origin
+           <code>fetch()</code> that 302s to the CDN's origin still enforces CORS on the final response,
+           and GCS doesn't send <code>Access-Control-Allow-Origin</code> by default. The <code>&lt;img&gt;</code>
+           thumbnail rendered fine regardless (plain image loads don't enforce CORS), which is exactly why it
+           was easy to miss. Fixed with a bucket CORS policy + cache invalidation; the app itself was also
+           hardened to surface fetch failures instead of failing silently next time.</p>
       </div>
     </div>
   </section>
