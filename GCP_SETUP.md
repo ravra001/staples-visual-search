@@ -534,6 +534,54 @@ apply it once with `gcloud run services update`).
 
 ---
 
+## 14. Catalog category audit & fix (optional maintenance)
+
+The original ABO→category mapping used `furniture` as a de facto overflow
+bucket — 116 rugs, 75 wall-art prints, 73 sofas, and more were filed under
+`furniture` instead of their real category, degrading anything that ranks
+*within* a category (Complete the Look, Shop the Room's per-tile matching,
+the category nav). Fixed with a self-consistency audit rather than a guess
+or a new keyword classifier: every product already has a stored fused
+vector, and every category already has a centroid (the mean of its
+members' vectors) — the same ones the app's own category-scoped ranking
+already uses. Check whether each product's own vector sits closer to a
+*different* category's centroid than to its assigned one; if so, it's
+probably mislabeled.
+
+```bash
+cd backend
+python fix_catalog_categories.py --dry-run   # review the diff first
+python fix_catalog_categories.py             # applies to catalog_abo.json
+```
+
+Conservative on purpose (only relabels at a manually-spot-checked-clean
+margin threshold — see the script's own comments for the full reasoning,
+including a real false-positive pattern it excludes: generic AmazonBasics
+product photography acting as a false attractor for `office_supplies`,
+not a genuine content match). Run it twice — a second pass catches
+mismatches that only became visible after the first pass shifted the
+centroids — then stop once a third pass shows clear diminishing returns.
+
+This only rewrites the local `catalog_abo.json`. Cloud SQL has its own
+already-seeded copy of `category` that a local file edit never touches —
+apply the same corrections there with:
+
+```bash
+export DATA_BACKEND=sql
+export CATALOG_FILE=data/catalog_abo.json
+export DATABASE_URL=...   # see the Cloud Shell connection note below
+python apply_category_corrections.py --dry-run
+python apply_category_corrections.py
+```
+
+This bulk-diffs the corrected catalog against the live table in one query
+(not one per sku — the same N+1 lesson already documented above), applies
+only the rows that actually changed, and calls the existing
+`refresh_category_centroids()` so the live classifier isn't left scoring
+against the pre-fix groupings.
+
+---
+
 ## Troubleshooting
 
 Every one of these actually happened during this project's deployment.
@@ -905,3 +953,48 @@ The app-side code was also hardened regardless of this fix (both the hero
 and Shop the Room sample handlers now catch and surface fetch failures
 instead of failing silently) — see `app.js`'s `renderHeroSamples` /
 `renderRoomSamples`.
+
+### Connecting to Cloud SQL from Cloud Shell for a one-off script (not via Cloud Run)
+
+Any script run directly in Cloud Shell (`apply_category_corrections.py`,
+`init_and_seed()`, etc.) needs its own `DATABASE_URL` — it can't reuse
+whatever's in the `DATABASE_URL` secret Cloud Run uses, because that
+secret's value is usually a **Unix-socket** connection string
+(`postgresql+psycopg://user:pass@/dbname?host=/cloudsql/PROJECT:REGION:INSTANCE`),
+which only works from *inside* Cloud Run (it auto-mounts that socket path
+via `--add-cloudsql-instances`). Cloud Shell has no such socket, so
+connecting fails with `No such file or directory` on that path.
+
+Fix: swap the socket host for the instance's public IP + port, reusing the
+real credentials already in the secret (never printed to the terminal):
+
+```bash
+export SQL_PUBLIC_IP=$(gcloud sql instances describe "$SQL_INSTANCE" \
+  --format='value(ipAddresses[0].ipAddress)')
+
+export DATABASE_URL=$(gcloud secrets versions access latest --secret=<your-db-url-secret> \
+  | sed -E "s#@/([a-zA-Z0-9_]+)\?host=/cloudsql/[^ ]*#@${SQL_PUBLIC_IP}:5432/\1#")
+```
+
+That alone usually isn't enough — you'll then hit `psycopg.errors.
+ConnectionTimeout`, because Cloud Shell's IP isn't in the instance's
+authorized networks. **Check what's already authorized before changing
+it** (`--authorized-networks` *replaces* the whole list, it doesn't
+append):
+
+```bash
+gcloud sql instances describe "$SQL_INSTANCE" \
+  --format="value(settings.ipConfiguration.authorizedNetworks)"
+
+MY_IP=$(curl -s ifconfig.me)
+# re-include every existing entry from the describe output above, plus $MY_IP
+gcloud sql instances patch "$SQL_INSTANCE" \
+  --authorized-networks=<existing-entry-1>,<existing-entry-2>,${MY_IP}/32
+```
+
+**Cloud Shell's public IP is ephemeral and can change between commands
+within the same session** — if a connection that worked a few minutes ago
+suddenly times out again with no other change, re-run `curl -s ifconfig.me`
+and compare against what's actually authorized before assuming something
+else broke. Run the IP check and the connection attempt in the same
+command block once authorized, so the IP can't drift in between.

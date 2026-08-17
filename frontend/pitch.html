@@ -212,6 +212,14 @@
            fixed with a bucket CORS policy, and the app itself hardened to surface (not swallow) the failure
            next time.</p>
       </div>
+      <div class="pitch-proof-card">
+        <h4>✓ 685 miscategorized products, found &amp; fixed live</h4>
+        <p>The catalog's own category data was quietly wrong for ~7% of products (rugs and wall art filed
+           under a generic "furniture" bucket). Caught by checking each product's own vector against its
+           category's centroid — the same signal the app already ranks with — not a guess. Fixed on the
+           local catalog and the live Cloud SQL table, with a caught-and-excluded false-positive pattern
+           along the way.</p>
+      </div>
     </div>
   </section>
 

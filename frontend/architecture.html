@@ -270,6 +270,17 @@
            was easy to miss. Fixed with a bucket CORS policy + cache invalidation; the app itself was also
            hardened to surface fetch failures instead of failing silently next time.</p>
       </div>
+      <div class="note-card">
+        <h4>Category data was quietly wrong for ~7% of the catalog</h4>
+        <p>The original ABO→category mapping used <code>furniture</code> as a de facto overflow bucket —
+           rugs, sofas, and wall art all landed there instead of their real category, degrading anything
+           that ranks within a category (Complete the Look, Shop the Room). Found via a self-consistency
+           check (does each product's own vector actually sit closest to its assigned category's centroid?)
+           rather than a guess — reusing vectors and centroids the app already computes, no new model calls.
+           685 corrections applied to both the local catalog and the live Cloud SQL table; a real
+           false-positive pattern (generic product photography falsely attracting one category's centroid)
+           was caught and excluded before anything was applied. See <code>fix_catalog_categories.py</code>.</p>
+      </div>
     </div>
   </section>
 

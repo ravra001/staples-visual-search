@@ -300,6 +300,14 @@
          farther from a lamp's than from another chair's even when the pair is a genuinely good style match —
          gating on that score would empty out most categories rather than surface real coherence. Top-1-per-
          category is already a strong filter on its own.</p>
+      <p><b>Category data quality directly determines this feature's quality.</b> Live testing surfaced
+         products that were themselves miscategorized — a chair filed under "furniture" pulled other
+         miscategorized chairs into what should have been a diverse result. Root-caused with the same
+         self-consistency check this page keeps coming back to: compare each product's own vector against
+         its assigned category's centroid, using nothing the app didn't already compute. Found ~7% of the
+         catalog mislabeled (a "furniture" catch-all bucket hiding real rugs, sofas, and wall art), fixed
+         685 of them on both the local catalog and the live Cloud SQL table — see
+         <code>backend/fix_catalog_categories.py</code> and <code>GCP_SETUP.md</code>.</p>
     </div>
   </section>
 
