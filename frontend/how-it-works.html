@@ -390,6 +390,9 @@
           <tr><td>match_shopping_list</td><td>Multiple distinct items in one call, typed directly or read off a photographed list/note/receipt (no OCR pipeline elsewhere in this app to reuse, so Gemini reads the photo itself); each item is resolved to a real SKU via <code>_hybrid_search</code>.</td></tr>
           <tr><td>not_shoppable</td><td>The escape hatch when an attached photo is neither a room nor a list — an irrelevant photo used to get forced into shop_the_room and return confidently wrong furniture; now it can decline honestly.</td></tr>
           <tr><td>swap_bundle_item</td><td>"Make the desk cheaper" / "a nicer chair" for any item already known from the conversation (by sku) — finds a genuine same-category alternative, stateless, no bundle tracking needed server-side.</td></tr>
+          <tr><td>find_similar</td><td>"Like that one but in black" / "the same rug but under $150" for a known sku — reuses the exact same <code>_do_similar_search</code> machinery as the standalone /similar endpoint and Shop the Room's refine step, so style-text and max-price behave identically everywhere.</td></tr>
+          <tr><td>find_deals</td><td>Real list_price-vs-price discounts, optionally scoped to a category and/or a minimum discount percent — plain Python sort over the catalog, not an LLM guess at what's "on sale."</td></tr>
+          <tr><td>compare_products</td><td>Pulls real price/rating/review data for 2-4 named skus so the model writes a tradeoff comparison grounded in actual numbers instead of paraphrasing from memory.</td></tr>
         </tbody>
       </table>
     </div>
@@ -451,7 +454,7 @@
           <tr><td>Hybrid text search</td><td>Keyword LIKE-match and CLIP-text-vs-fused-vector semantic ranking, combined via Reciprocal Rank Fusion — no shared score to blend, so ranks fuse instead of numbers.</td></tr>
           <tr><td>Complete the Look</td><td>One stored vector → best match per OTHER category (not the source item's own), reusing Shop the Room's per-category search with no match-threshold gate.</td></tr>
           <tr><td>QR + mobile capture</td><td>Client-side QR code → phone camera → same startVisualSearch upload flow as desktop, downscaled first so the cross-page handoff can't exceed sessionStorage's quota.</td></tr>
-          <tr><td>Staples AI</td><td>In-process Gemini tool-calling over eight tools, all backed by this same catalog/search/CV machinery — the model orchestrates, plain Python computes.</td></tr>
+          <tr><td>Staples AI</td><td>In-process Gemini tool-calling over eleven tools, all backed by this same catalog/search/CV machinery — the model orchestrates, plain Python computes.</td></tr>
         </tbody>
       </table>
     </div>
