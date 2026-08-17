@@ -10,6 +10,7 @@ products_data.py and embeddings.py for the two intended swap points:
 """
 import base64
 import os
+import re
 import sys
 import time
 import traceback
@@ -1013,6 +1014,28 @@ def _build_screen_context(last_items):
     )
 
 
+_STOPWORDS = {"the", "and", "for", "with", "some", "any", "get", "buy", "need", "please"}
+
+
+def _plausible_match(query, item):
+    """_hybrid_search's RRF fusion has no natural reject threshold -- it
+    returns SOMETHING for almost any string, since the semantic side always
+    ranks the whole catalog by cosine similarity even when nothing is truly
+    relevant. Taking its top-1 unfiltered meant match_shopping_list could
+    confidently resolve a scribbled "milk" to an office chair, and the
+    unmatched list -- meant to be an honest signal -- would almost never
+    populate. Require at least one real query word to actually appear in
+    the matched product's own name/category text, mirroring the substring
+    logic the keyword side of search already uses. Imperfect (misses pure
+    synonyms like "sofa" matching a product only ever named "couch"), but a
+    real floor where there was none."""
+    words = [w for w in re.split(r"\W+", query.lower()) if len(w) > 2 and w not in _STOPWORDS]
+    if not words:
+        return True
+    haystack = f"{item.get('name', '')} {item.get('category', '')}".lower()
+    return any(w in haystack for w in words)
+
+
 def _do_agent_chat(message, history, last_items=None, image_bytes=None, image_mime=None):
     """Tool-calling loop: ask Gemini, and when it calls a tool, run the
     REAL implementation in-process (_hybrid_search for search_products,
@@ -1063,7 +1086,13 @@ def _do_agent_chat(message, history, last_items=None, image_bytes=None, image_mi
                 call_kwargs["tool_config"] = ToolConfig(
                     function_calling_config=ToolConfig.FunctionCallingConfig(
                         mode=ToolConfig.FunctionCallingConfig.Mode.ANY,
-                        allowed_function_names=["shop_the_room", "match_shopping_list"],
+                        # not_shoppable is the escape hatch -- without it, an
+                        # irrelevant photo (a pet, an unrelated screenshot)
+                        # still had to be forced into shop_the_room, which
+                        # doesn't return nothing, it returns nearest
+                        # neighbors: confidently wrong furniture instead of
+                        # an honest decline.
+                        allowed_function_names=["shop_the_room", "match_shopping_list", "not_shoppable"],
                     )
                 )
             except Exception:
@@ -1151,7 +1180,7 @@ def _do_agent_chat(message, history, last_items=None, image_bytes=None, image_mi
                     except (TypeError, ValueError):
                         qty = 1
                     top = _hybrid_search(query, limit=1)["items"]
-                    if top:
+                    if top and _plausible_match(query, top[0]):
                         item = dict(top[0])
                         item["requested_qty"] = qty
                         matched.append(item)
@@ -1161,6 +1190,10 @@ def _do_agent_chat(message, history, last_items=None, image_bytes=None, image_mi
                 bundle = {"feasible": bool(matched), "items": matched, "unmatched": unmatched, "total": total}
                 tool_result = agent.trim_room_bundle_for_model(bundle)
                 new_items = matched
+            elif name == "not_shoppable":
+                bundle = None
+                tool_result = {"acknowledged": True}
+                new_items = []
             else:
                 tool_result = {"error": f"unknown tool {name}"}
                 new_items = []

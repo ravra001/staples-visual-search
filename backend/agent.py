@@ -43,6 +43,17 @@ LLM-callable tools.
                            resolving each one to a real catalog SKU is
                            then handed back to the same deterministic
                            search (_hybrid_search) everything else uses.
+  not_shoppable           — the escape hatch for the two tools above. An
+                           attached image is forced into calling ONE of
+                           shop_the_room/match_shopping_list/not_shoppable
+                           (see main.py's _do_agent_chat) so "attach a
+                           photo, nothing happens" can't recur -- but
+                           forcing a choice between only the first two
+                           meant an irrelevant photo (a pet, a screenshot
+                           of something unrelated) still got tiled and
+                           vector-searched, returning confidently wrong
+                           furniture instead of declining. This tool lets
+                           the model opt out honestly instead.
 
 Cart-adding is NOT a tool the model calls directly. A single searched
 product already has a working Add-to-cart button on its product card (see
@@ -84,6 +95,7 @@ def _get_agent_model():
     tool = Tool(function_declarations=[
         _search_products_decl(), _plan_office_setup_decl(), _plan_room_setup_decl(),
         _shop_the_room_decl(), _match_shopping_list_decl(), _complete_the_look_decl(),
+        _not_shoppable_decl(),
     ])
     model = GenerativeModel(
         config.AGENT_MODEL,
@@ -95,15 +107,19 @@ def _get_agent_model():
             "them (an office). Use plan_room_setup for any other whole-room or whole-space furnishing "
             "request (living room, bedroom, dining room, entryway, etc.) with a budget, optionally "
             "with a style or color -- do not tell the user you can't plan a room; that's what this "
-            "tool is for. "
+            "tool is for. If a plan_room_setup result has an item with style_matched: false, say so "
+            "honestly (e.g. 'no grey option for the rug, so I picked the best-rated one instead') "
+            "rather than presenting it as if it matched. "
             "When a photo is attached: if it shows a room or physical space the user wants furnished, "
             "call shop_the_room (it takes no arguments -- the photo is already available server-side) "
             "and then narrate the real results it returns, don't invent your own guesses about what "
             "matches. If it shows a list, note, receipt, or screenshot of items the user wants to buy, "
             "read the text yourself and call match_shopping_list with the items you found as "
             "{query, quantity} pairs -- one entry per distinct item, quantity defaulting to 1 if none "
-            "is written. If a tool call reports no photo was attached, ask the user to attach one "
-            "rather than guessing. "
+            "is written. If it's neither a room nor a list of items to shop for (a pet, an unrelated "
+            "screenshot, anything not shoppable against this catalog), call not_shoppable with a short "
+            "reason instead of guessing which of the other two to force it into. If a tool call reports "
+            "no photo was attached, ask the user to attach one rather than guessing. "
             "Use complete_the_look when the user references a specific product (by name/sku from "
             "context or a prior search result) and asks what else goes with it, e.g. 'what else do I "
             "need for this desk?' -- search_products first if you don't already have its sku. "
@@ -234,6 +250,24 @@ def _match_shopping_list_decl():
     )
 
 
+def _not_shoppable_decl():
+    from vertexai.generative_models import FunctionDeclaration
+    return FunctionDeclaration(
+        name="not_shoppable",
+        description=(
+            "Call this when a photo is attached but it's neither a room/space to furnish nor a list "
+            "of items to shop for -- e.g. a pet, a person, an unrelated screenshot. Lets you decline "
+            "honestly instead of being forced to guess between shop_the_room and match_shopping_list."
+        ),
+        parameters={
+            "type": "object",
+            "properties": {
+                "reason": {"type": "string", "description": "One short phrase describing what the photo actually shows"},
+            },
+        },
+    )
+
+
 def trim_items_for_model(items, cap=8):
     """Full _serialize()'d product dicts include description, image_url,
     list_price, savings_pct -- thousands of wasted tokens per turn feeding
@@ -245,6 +279,8 @@ def trim_items_for_model(items, cap=8):
              "price": p["price"], "category": p["category"]}
         if "requested_qty" in p:   # set by match_shopping_list -- worth the model knowing
             d["requested_qty"] = p["requested_qty"]
+        if "style_matched" in p:   # set by plan_room_setup -- worth the model knowing
+            d["style_matched"] = p["style_matched"]
         out.append(d)
     return out
 
@@ -443,7 +479,13 @@ def plan_room_setup(room_type, budget, style=""):
         if not items:
             continue
         matching = [p for p in items if _style_match(p, style_terms)]
-        picks[cat] = (matching or items)[0]
+        picked = dict((matching or items)[0])
+        # False only means a real style/color term was given and nothing in
+        # this category's real product text matched it -- silently falling
+        # back to the cheapest unrelated item read as the tool ignoring the
+        # request, so the reply can now say so instead of pretending.
+        picked["style_matched"] = bool(matching)
+        picks[cat] = picked
 
     if not picks:
         return {"feasible": False, "reason": f"The catalog has nothing available for a {room_type or 'room'} setup right now."}
@@ -474,6 +516,8 @@ def plan_room_setup(room_type, budget, style=""):
             best = max(affordable, key=lambda p: (_quality_score(p), p["price"]))
             if best["sku"] != current["sku"]:
                 remaining -= (best["price"] - current["price"])
+                best = dict(best)
+                best["style_matched"] = bool(matching)
                 picks[cat] = best
 
     total = sum(p["price"] for p in picks.values())
