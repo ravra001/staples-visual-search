@@ -33,10 +33,16 @@ LLM-callable tools.
                            sees; it never invents the matches itself --
                            the real embedding search does, same as the
                            standalone Shop the Room feature.
-  match_shopping_list    — when a photo is attached AND it's a list/note of
-                           items (not a room), the OPPOSITE division of
-                           labor: reading messy real-world text off an
-                           image is exactly what Gemini's vision is good
+  match_shopping_list    — resolves MULTIPLE distinct items to real catalog
+                           products in one call, from either of two inputs:
+                           a typed message ("5 staplers, 3 grey chairs, a
+                           desk lamp") or a photo of a list/note/receipt --
+                           the dispatch logic (main.py) doesn't care which,
+                           it only ever reads args["items"] off the
+                           function call. For the photo case specifically,
+                           this is the OPPOSITE division of labor from
+                           shop_the_room: reading messy real-world text off
+                           an image is exactly what Gemini's vision is good
                            at and there's no deterministic OCR pipeline
                            elsewhere in this app to reuse, so Gemini reads
                            it and extracts {query, quantity} pairs itself;
@@ -111,7 +117,12 @@ def _get_agent_model():
         tools=[tool],
         system_instruction=(
             "You are Staples AI, a shopping assistant for an office-supply and furniture catalog. "
-            "Use search_products to find products by keyword or description. Use plan_office_setup "
+            "Use search_products to find products by keyword or description for a SINGLE item. When "
+            "the user asks for MULTIPLE distinct items in one message -- typed directly, e.g. '5 "
+            "staplers, 3 grey chairs, a desk lamp' -- use match_shopping_list instead, with one "
+            "{query, quantity} pair per item (quantity defaulting to 1 if none given): it gives "
+            "quantity-aware results and a bulk add-to-cart action that separate search_products calls "
+            "don't. Use plan_office_setup "
             "ONLY when the user gives a headcount of people and a budget to furnish desks+chairs for "
             "them (an office). Use plan_room_setup for any other whole-room or whole-space furnishing "
             "request (living room, bedroom, dining room, entryway, etc.) with a budget, optionally "
@@ -239,8 +250,11 @@ def _match_shopping_list_decl():
     return FunctionDeclaration(
         name="match_shopping_list",
         description=(
-            "Resolve a list of items (that you read yourself off an attached photo of a list, note, "
-            "or receipt) to real catalog products. Pass every distinct item you found."
+            "Resolve MULTIPLE distinct items to real catalog products in one call -- whether the user "
+            "typed them directly in a message (e.g. '5 staplers, 3 grey chairs, a desk lamp') or you "
+            "read them yourself off an attached photo of a list, note, or receipt. Gives quantity-aware "
+            "results and a bulk add-to-cart action, unlike separate search_products calls. Pass every "
+            "distinct item found. For a single item, use search_products instead."
         ),
         parameters={
             "type": "object",
