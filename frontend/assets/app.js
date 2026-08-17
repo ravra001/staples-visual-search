@@ -381,7 +381,7 @@ function productCardHTML(p, opts = {}) {
       <div class="qty-row">
         <div class="qty-stepper">
           <button class="qty-dec">−</button>
-          <span class="qty-val">1</span>
+          <span class="qty-val">${p.requested_qty || 1}</span>
           <button class="qty-inc">+</button>
         </div>
         <button class="add-btn">Add</button>
@@ -395,7 +395,11 @@ function wireProductCardInteractions(container) {
     if (card.dataset.wired) return;   // skip already-wired cards (e.g. "Load more" appends)
     card.dataset.wired = "1";
     const qtyVal = card.querySelector(".qty-val");
-    let qty = 1;
+    // Read the starting value from the DOM rather than hardcoding 1 --
+    // match_shopping_list results pre-fill a requested quantity here (see
+    // productCardHTML), and this closure needs to start in sync with what's
+    // actually displayed or the stepper buttons would silently reset it to 1.
+    let qty = parseInt(qtyVal.textContent, 10) || 1;
     card.querySelector(".qty-inc").addEventListener("click", () => {
       qty++; qtyVal.textContent = qty;
     });
@@ -1415,6 +1419,10 @@ let _agentHistory = []; // [{role: "user"|"model", text}] -- kept in memory only
 // has nothing to resolve against, since the model is told not to state
 // prices/skus itself and so never actually learns what it showed.
 let _agentLastItems = [];
+// Photo attached to the NEXT message only -- {b64, mime, dataUrl} or null.
+// Cleared after sending; not carried into history (see _do_agent_chat on
+// the backend, which likewise only attaches an image to the current turn).
+let _agentPendingImage = null;
 
 function buildAgentModal() {
   if (_agentModalBuilt) return;
@@ -1432,10 +1440,17 @@ function buildAgentModal() {
       <div class="vs-agent-messages" id="vs-agent-messages">
         <div class="vs-agent-msg vs-agent-msg-model">
           Hi! Ask me to find a product, or try something like
-          <em>"set up an office for 15 people under $5000"</em>.
+          <em>"set up an office for 15 people under $5000"</em>. You can also attach a
+          photo of a room to furnish, or a photo of a shopping list.
         </div>
       </div>
+      <div id="vs-agent-image-preview" class="vs-agent-image-preview" hidden>
+        <img id="vs-agent-image-preview-img" alt="Attached photo" />
+        <button id="vs-agent-image-remove" type="button" aria-label="Remove photo">&times;</button>
+      </div>
       <form id="vs-agent-form" class="vs-agent-form" autocomplete="off">
+        <button id="vs-agent-attach-btn" type="button" title="Attach a photo" aria-label="Attach a photo">${ICONS.camera}</button>
+        <input id="vs-agent-image-input" type="file" accept="image/*" hidden />
         <input id="vs-agent-input" type="text" placeholder="Ask Staples AI…" />
         <button type="submit">Send</button>
       </form>
@@ -1443,18 +1458,44 @@ function buildAgentModal() {
   document.body.appendChild(modal);
   modal.querySelector("#vs-agent-close").addEventListener("click", () => { modal.hidden = true; });
   modal.addEventListener("click", (e) => { if (e.target === modal) modal.hidden = true; });
+
+  const imageInput = modal.querySelector("#vs-agent-image-input");
+  modal.querySelector("#vs-agent-attach-btn").addEventListener("click", () => imageInput.click());
+  imageInput.addEventListener("change", () => {
+    const file = imageInput.files[0];
+    imageInput.value = "";
+    if (!file) return;
+    if (!file.type.startsWith("image/")) return;
+    const reader = new FileReader();
+    reader.onload = () => {
+      const dataUrl = reader.result;   // "data:image/jpeg;base64,AAAA..."
+      const b64 = dataUrl.split(",")[1] || "";
+      _agentPendingImage = { b64, mime: file.type, dataUrl };
+      modal.querySelector("#vs-agent-image-preview-img").src = dataUrl;
+      modal.querySelector("#vs-agent-image-preview").hidden = false;
+    };
+    reader.readAsDataURL(file);
+  });
+  modal.querySelector("#vs-agent-image-remove").addEventListener("click", () => {
+    _agentPendingImage = null;
+    modal.querySelector("#vs-agent-image-preview").hidden = true;
+  });
+
   modal.querySelector("#vs-agent-form").addEventListener("submit", (e) => {
     e.preventDefault();
     const form = e.target;
     const input = form.querySelector("#vs-agent-input");
     const text = input.value.trim();
-    if (!text || input.disabled) return;   // input.disabled: a request is already in flight
+    const image = _agentPendingImage;
+    if ((!text && !image) || input.disabled) return;   // input.disabled: a request is already in flight
     input.value = "";
+    _agentPendingImage = null;
+    modal.querySelector("#vs-agent-image-preview").hidden = true;
     input.disabled = true;
-    form.querySelector("button").disabled = true;
-    sendAgentMessage(text).finally(() => {
+    form.querySelector("button[type=submit]").disabled = true;
+    sendAgentMessage(text, image).finally(() => {
       input.disabled = false;
-      form.querySelector("button").disabled = false;
+      form.querySelector("button[type=submit]").disabled = false;
       input.focus();
     });
   });
@@ -1476,20 +1517,27 @@ function _appendAgentMessage(role, html) {
   return div;
 }
 
-async function sendAgentMessage(text) {
-  _appendAgentMessage("user", esc(text));
+async function sendAgentMessage(text, image = null) {
+  const imgThumb = image ? `<img class="vs-agent-msg-thumb" src="${image.dataUrl}" alt="Attached photo" />` : "";
+  _appendAgentMessage("user", imgThumb + (text ? `<p>${esc(text)}</p>` : ""));
   const pending = _appendAgentMessage("model", `<div class="spinner"></div>`);
 
   try {
     const res = await fetch(`${API_BASE}/api/agent/chat`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ message: text, history: _agentHistory, last_items: _agentLastItems }),
+      body: JSON.stringify({
+        message: text, history: _agentHistory, last_items: _agentLastItems,
+        image_b64: image ? image.b64 : null, image_mime: image ? image.mime : null,
+      }),
     });
     if (!res.ok) throw new Error("Staples AI is unavailable right now.");
     const data = await res.json();
 
-    _agentHistory.push({ role: "user", text });
+    // Images are single-turn only (not resent on later turns) -- history
+    // keeps text so a follow-up like "make it cheaper" can still reference
+    // what was said about the photo, just not the photo itself again.
+    _agentHistory.push({ role: "user", text: text || "[attached a photo]" });
     _agentHistory.push({ role: "model", text: data.reply || "" });
     // Only what's about to render below counts as "on screen" for the next
     // follow-up -- replaced each turn, not accumulated across turns.
@@ -1500,6 +1548,9 @@ async function sendAgentMessage(text) {
     let html = `<p>${esc(data.reply || "")}</p>`;
     if (data.degraded) {
       html += `<p class="vs-agent-degraded">Staples AI is unavailable right now — showing plain search results instead.</p>`;
+    }
+    if (data.bundle && data.bundle.unmatched && data.bundle.unmatched.length) {
+      html += `<p class="vs-agent-degraded">Couldn't find a match for: ${esc(data.bundle.unmatched.join(", "))}</p>`;
     }
     if (data.items && data.items.length) {
       html += `<div class="vs-agent-cards">${data.items.map(p => productCardHTML(p)).join("")}</div>`;
@@ -1515,8 +1566,11 @@ async function sendAgentMessage(text) {
       bundleBtn.addEventListener("click", () => {
         const b = data.bundle;
         if (b.items) {
-          // plan_room_setup shape: one of each item in the flat `items` list.
-          b.items.forEach(item => addToCart(item.sku, 1));
+          // plan_room_setup / match_shopping_list shape: a flat `items`
+          // list, one entry each -- requested_qty is set by
+          // match_shopping_list (defaults to 1 for plan_room_setup items,
+          // which don't carry it).
+          b.items.forEach(item => addToCart(item.sku, item.requested_qty || 1));
         } else {
           // plan_office_setup shape: N desks + N chairs for the headcount,
           // one shared item.

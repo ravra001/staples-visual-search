@@ -8,6 +8,7 @@ products_data.py and embeddings.py for the two intended swap points:
                           Vertex AI Vector Search, once the catalog is large
                           enough that brute force stops being instant.
 """
+import base64
 import os
 import sys
 import time
@@ -966,6 +967,12 @@ class AgentChatRequest(BaseModel):
     # _build_screen_context. Untrusted client input: only the four fields
     # below are ever read out of each entry.
     last_items: list[dict] = []
+    # Optional photo attached to THIS turn only (base64-encoded, no data:
+    # URL prefix) -- e.g. a room to furnish (routes to shop_the_room) or a
+    # photo of a list/note/receipt (routes to match_shopping_list). Not
+    # carried into history for later turns; see _do_agent_chat.
+    image_b64: str | None = None
+    image_mime: str | None = None
 
 
 def _history_to_contents(history):
@@ -1006,18 +1013,30 @@ def _build_screen_context(last_items):
     )
 
 
-def _do_agent_chat(message, history, last_items=None):
+def _do_agent_chat(message, history, last_items=None, image_bytes=None, image_mime=None):
     """Tool-calling loop: ask Gemini, and when it calls a tool, run the
     REAL implementation in-process (_hybrid_search for search_products,
     agent.plan_office_setup for plan_office_setup) and feed the real
     result back -- the model never invents product data or prices, it
-    only ever narrates what these two functions actually returned."""
+    only ever narrates what these two functions actually returned.
+
+    image_bytes (if given) is attached to THIS turn's Content alongside the
+    text -- Gemini's own vision sees it directly (needed for it to decide
+    "room" vs "list" and, for a list, to read the text off it itself). It is
+    NOT re-attached on later turns (history is text-only), and the
+    shop_the_room/match_shopping_list branches below read it from this
+    function's closure, not from anything Gemini echoes back -- a model
+    can decide something IS an image, but the actual bytes never round-trip
+    through a function-call argument."""
     from vertexai.generative_models import Content, Part
 
     state = agent._get_agent_model()
     model = state["model"]
     prefixed_message = _build_screen_context(last_items) + message
-    contents = _history_to_contents(history) + [Content(role="user", parts=[Part.from_text(prefixed_message)])]
+    turn_parts = [Part.from_text(prefixed_message)]
+    if image_bytes:
+        turn_parts.append(Part.from_data(data=image_bytes, mime_type=image_mime or "image/jpeg"))
+    contents = _history_to_contents(history) + [Content(role="user", parts=turn_parts)]
 
     items, bundle, seen_skus = [], None, set()
     for i in range(config.AGENT_MAX_ITERATIONS):
@@ -1059,6 +1078,68 @@ def _do_agent_chat(message, history, last_items=None):
                 new_items = list(bundle.get("items") or [])
                 if bundle.get("closest_item"):
                     new_items.append(bundle["closest_item"])
+            elif name == "complete_the_look":
+                sku = str(args.get("sku", "")).strip()
+                matches = _do_complete_the_look(sku) if sku else None
+                if matches is None:
+                    tool_result = {"error": f"Unknown sku {sku!r} -- search_products first to find a real one."}
+                    new_items = []
+                else:
+                    by_sku = get_products_by_skus([s for s, _ in matches])
+                    result_items = []
+                    for s, score in matches:
+                        p = by_sku.get(s)
+                        if p:
+                            item = _serialize(p)
+                            item["match_score"] = round(score * 100, 1)
+                            result_items.append(item)
+                    bundle = None
+                    tool_result = {"count": len(result_items), "items": agent.trim_items_for_model(result_items)}
+                    new_items = result_items
+            elif name == "shop_the_room":
+                if not image_bytes:
+                    tool_result = {"error": "No photo is attached to this message. Ask the user to attach one."}
+                    new_items = []
+                else:
+                    try:
+                        matches = _do_shop_the_room(image_bytes)
+                    except OSError:
+                        # Same failure mode /api/shop-the-room guards against:
+                        # PIL couldn't decode the attached image.
+                        matches = []
+                    by_sku = get_products_by_skus([sku for sku, _ in matches])
+                    result_items = []
+                    for sku, score in matches:
+                        p = by_sku.get(sku)
+                        if p:
+                            item = _serialize(p)
+                            item["match_score"] = round(score * 100, 1)
+                            result_items.append(item)
+                    bundle = None
+                    tool_result = {"count": len(result_items), "items": agent.trim_items_for_model(result_items, cap=6)}
+                    new_items = result_items
+            elif name == "match_shopping_list":
+                requested = args.get("items") or []
+                matched, unmatched = [], []
+                for entry in requested[:20]:   # a photographed list is still bounded -- avoid a runaway tool call
+                    query = str((entry or {}).get("query", "")).strip()
+                    if not query:
+                        continue
+                    try:
+                        qty = max(1, min(int(entry.get("quantity", 1)), 999))
+                    except (TypeError, ValueError):
+                        qty = 1
+                    top = _hybrid_search(query, limit=1)["items"]
+                    if top:
+                        item = dict(top[0])
+                        item["requested_qty"] = qty
+                        matched.append(item)
+                    else:
+                        unmatched.append(query)
+                total = round(sum(item["price"] * item["requested_qty"] for item in matched), 2)
+                bundle = {"feasible": bool(matched), "items": matched, "unmatched": unmatched, "total": total}
+                tool_result = agent.trim_room_bundle_for_model(bundle)
+                new_items = matched
             else:
                 tool_result = {"error": f"unknown tool {name}"}
                 new_items = []
@@ -1091,10 +1172,25 @@ async def agent_chat(body: AgentChatRequest):
     if not config.AGENT_ENABLED:
         raise HTTPException(503, "Staples AI is disabled")
     message = (body.message or "").strip()
-    if not message:
-        raise HTTPException(400, "message is required")
     if len(message) > _AGENT_MAX_MESSAGE_CHARS:
         raise HTTPException(400, f"message is too long (limit {_AGENT_MAX_MESSAGE_CHARS} characters)")
+
+    image_bytes = None
+    if body.image_b64:
+        try:
+            image_bytes = base64.b64decode(body.image_b64, validate=True)
+        except (base64.binascii.Error, ValueError):
+            raise HTTPException(400, "image_b64 is not valid base64")
+        if len(image_bytes) > _MAX_UPLOAD_BYTES:
+            raise HTTPException(413, f"Image too large (limit {config.MAX_UPLOAD_MB:g} MB)")
+        if not (body.image_mime or "").startswith("image/"):
+            raise HTTPException(400, "image_mime must be an image/* type")
+
+    # A bare photo with no caption is a legitimate request ("furnish this" is
+    # implied) -- only reject truly empty input.
+    if not message and not image_bytes:
+        raise HTTPException(400, "message or image is required")
+
     # This is a public, unauthenticated endpoint that spends real Vertex
     # tokens per call -- an unbounded client-supplied history is an easy way
     # to balloon that cost (or just break generate_content on a request
@@ -1103,7 +1199,8 @@ async def agent_chat(body: AgentChatRequest):
     last_items = (body.last_items or [])[:12]
 
     try:
-        return await run_in_threadpool(_do_agent_chat, message, history, last_items)
+        return await run_in_threadpool(
+            _do_agent_chat, message, history, last_items, image_bytes, body.image_mime)
     except Exception:
         # Swallowed on purpose (falls back to plain search below) but must be
         # loud about it -- an unlogged except here means Vertex/Gemini could
@@ -1117,6 +1214,13 @@ async def agent_chat(body: AgentChatRequest):
         # is for expected startup/status lines, not failures.
         print(f"[agent] _do_agent_chat failed, falling back to hybrid search:\n{traceback.format_exc()}",
               file=sys.stderr)
+        if not message:
+            # Image-only request and Gemini (the only thing that can read an
+            # image here) is unavailable -- plain _hybrid_search has nothing
+            # to search on, so say so honestly instead of running it on "".
+            return {"reply": "Staples AI is unavailable right now, and I can't read photos without it "
+                              "— try describing what you're looking for in words.",
+                    "items": [], "bundle": None, "degraded": True}
         result = _hybrid_search(message, limit=8)
         reply = (f"Here's what I found for \"{message}\"." if result["count"]
                  else f"I couldn't find anything for \"{message}\" — try different words.")

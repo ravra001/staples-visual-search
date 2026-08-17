@@ -3,7 +3,7 @@ Staples AI — tool-calling chat agent.
 
 Runs in-process inside the same FastAPI app/Cloud Run service as
 everything else (see main.py's /api/agent/chat and _do_agent_chat) — no
-separate service, no new deployment. Deliberately narrow: exactly three
+separate service, no new deployment. Deliberately narrow: five
 LLM-callable tools.
 
   search_products       — thin wrapper the ORCHESTRATION loop (main.py)
@@ -25,14 +25,32 @@ LLM-callable tools.
                            Same deterministic-math philosophy; style
                            matching is a plain substring filter over
                            catalog text, not a model judgment call.
+  shop_the_room          — when a photo is attached to the chat AND it's a
+                           room/space, run the EXISTING deterministic CV
+                           pipeline (_do_shop_the_room in main.py: tile the
+                           photo, embed, classify, vector-search per tile)
+                           against it. Gemini's vision narrates what it
+                           sees; it never invents the matches itself --
+                           the real embedding search does, same as the
+                           standalone Shop the Room feature.
+  match_shopping_list    — when a photo is attached AND it's a list/note of
+                           items (not a room), the OPPOSITE division of
+                           labor: reading messy real-world text off an
+                           image is exactly what Gemini's vision is good
+                           at and there's no deterministic OCR pipeline
+                           elsewhere in this app to reuse, so Gemini reads
+                           it and extracts {query, quantity} pairs itself;
+                           resolving each one to a real catalog SKU is
+                           then handed back to the same deterministic
+                           search (_hybrid_search) everything else uses.
 
-Cart-adding is NOT a tool. A single searched product already has a
-working Add-to-cart button on its product card (see productCardHTML in
-app.js) — exposing a redundant chat-driven single-SKU add path adds
-nothing. The one case that IS genuinely new — adding a whole
-plan_office_setup bundle in one action — is a plain frontend button
-keyed off the presence of a `bundle` in the response, not something the
-model decides to call.
+Cart-adding is NOT a tool the model calls directly. A single searched
+product already has a working Add-to-cart button on its product card (see
+productCardHTML in app.js) — a redundant chat-driven single-SKU add path
+adds nothing. The cases that ARE genuinely new -- adding a whole
+plan_office_setup/plan_room_setup bundle, or every matched line of a
+shopping list, in one action -- are plain frontend buttons keyed off the
+response shape, not something the model decides to call.
 """
 import re
 
@@ -65,6 +83,7 @@ def _get_agent_model():
     vertexai.init(project=project, location=location)
     tool = Tool(function_declarations=[
         _search_products_decl(), _plan_office_setup_decl(), _plan_room_setup_decl(),
+        _shop_the_room_decl(), _match_shopping_list_decl(), _complete_the_look_decl(),
     ])
     model = GenerativeModel(
         config.AGENT_MODEL,
@@ -76,8 +95,20 @@ def _get_agent_model():
             "them (an office). Use plan_room_setup for any other whole-room or whole-space furnishing "
             "request (living room, bedroom, dining room, entryway, etc.) with a budget, optionally "
             "with a style or color -- do not tell the user you can't plan a room; that's what this "
-            "tool is for. Keep replies to 2-3 sentences. Never state a specific price or SKU yourself "
-            "-- the product cards already shown to the user have that; just refer to items by name. "
+            "tool is for. "
+            "When a photo is attached: if it shows a room or physical space the user wants furnished, "
+            "call shop_the_room (it takes no arguments -- the photo is already available server-side) "
+            "and then narrate the real results it returns, don't invent your own guesses about what "
+            "matches. If it shows a list, note, receipt, or screenshot of items the user wants to buy, "
+            "read the text yourself and call match_shopping_list with the items you found as "
+            "{query, quantity} pairs -- one entry per distinct item, quantity defaulting to 1 if none "
+            "is written. If a tool call reports no photo was attached, ask the user to attach one "
+            "rather than guessing. "
+            "Use complete_the_look when the user references a specific product (by name/sku from "
+            "context or a prior search result) and asks what else goes with it, e.g. 'what else do I "
+            "need for this desk?' -- search_products first if you don't already have its sku. "
+            "Keep replies to 2-3 sentences. Never state a specific price or SKU yourself -- the "
+            "product cards already shown to the user have that; just refer to items by name. "
             "Some user messages will start with a bracketed [Context: ...] block listing what's "
             "currently shown on screen -- use it silently to resolve references like 'the second one' "
             "or 'cheaper than that' (e.g. by calling search_products with a refined query), but never "
@@ -141,16 +172,81 @@ def _plan_room_setup_decl():
     )
 
 
+def _complete_the_look_decl():
+    from vertexai.generative_models import FunctionDeclaration
+    return FunctionDeclaration(
+        name="complete_the_look",
+        description=(
+            "Given one product's SKU (from context or a prior search result), find one coordinating "
+            "item from each OTHER category to complete the look/room -- e.g. 'I just bought this desk, "
+            "what else do I need?' Requires a real sku already known from this conversation; if none "
+            "is available, search_products first."
+        ),
+        parameters={
+            "type": "object",
+            "properties": {
+                "sku": {"type": "string", "description": "The product SKU to find coordinating items for"},
+            },
+            "required": ["sku"],
+        },
+    )
+
+
+def _shop_the_room_decl():
+    from vertexai.generative_models import FunctionDeclaration
+    return FunctionDeclaration(
+        name="shop_the_room",
+        description=(
+            "Run the room-furnishing product matcher against the photo already attached to this "
+            "conversation. Only call this when a photo is attached and it shows a room or space to "
+            "furnish, not a list of items. Takes no arguments."
+        ),
+        parameters={"type": "object", "properties": {}},
+    )
+
+
+def _match_shopping_list_decl():
+    from vertexai.generative_models import FunctionDeclaration
+    return FunctionDeclaration(
+        name="match_shopping_list",
+        description=(
+            "Resolve a list of items (that you read yourself off an attached photo of a list, note, "
+            "or receipt) to real catalog products. Pass every distinct item you found."
+        ),
+        parameters={
+            "type": "object",
+            "properties": {
+                "items": {
+                    "type": "array",
+                    "description": "One entry per distinct item on the list.",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "query": {"type": "string", "description": "What to search the catalog for, e.g. 'stapler' or 'copy paper'"},
+                            "quantity": {"type": "integer", "description": "How many were requested; 1 if not specified"},
+                        },
+                        "required": ["query"],
+                    },
+                },
+            },
+            "required": ["items"],
+        },
+    )
+
+
 def trim_items_for_model(items, cap=8):
     """Full _serialize()'d product dicts include description, image_url,
     list_price, savings_pct -- thousands of wasted tokens per turn feeding
     that back to the model. It only needs enough to talk about the items;
     the FULL objects still go to the browser separately for card rendering."""
-    return [
-        {"sku": p["sku"], "name": p["name"], "brand": p.get("brand", ""),
-         "price": p["price"], "category": p["category"]}
-        for p in items[:cap]
-    ]
+    out = []
+    for p in items[:cap]:
+        d = {"sku": p["sku"], "name": p["name"], "brand": p.get("brand", ""),
+             "price": p["price"], "category": p["category"]}
+        if "requested_qty" in p:   # set by match_shopping_list -- worth the model knowing
+            d["requested_qty"] = p["requested_qty"]
+        out.append(d)
+    return out
 
 
 _BUNDLE_ITEM_KEYS = ("desk", "chair", "shared_item", "closest_desk", "closest_chair")

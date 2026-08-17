@@ -804,6 +804,23 @@ a { color: inherit; text-decoration: none; }
   background: var(--staples-red); border: none; color: #fff;
 }
 .vs-agent-form button:hover { background: var(--staples-red-dark); }
+#vs-agent-attach-btn {
+  flex: 0 0 auto; width: 36px; height: 36px; padding: 0; border-radius: 50%;
+  background: var(--bg-light, #f4f4f4); color: var(--gray-text); border: 1px solid var(--border);
+  display: flex; align-items: center; justify-content: center;
+}
+#vs-agent-attach-btn:hover { background: var(--bg-light, #f4f4f4); color: var(--staples-red); border-color: var(--staples-red); }
+#vs-agent-attach-btn svg { width: 16px; height: 16px; }
+.vs-agent-image-preview {
+  display: flex; align-items: center; gap: 8px; padding: 8px 14px;
+  border-top: 1px solid var(--border);
+}
+.vs-agent-image-preview img { width: 40px; height: 40px; object-fit: cover; border-radius: 6px; }
+#vs-agent-image-remove {
+  background: none; border: none; font-size: 18px; line-height: 1; cursor: pointer; color: var(--gray-text);
+}
+#vs-agent-image-remove:hover { color: var(--staples-red); }
+.vs-agent-msg-thumb { display: block; width: 100%; max-width: 160px; max-height: 160px; object-fit: cover; border-radius: 10px; margin-bottom: 6px; }
 
 /* Global drag-to-search overlay (see wireGlobalImageDrop in app.js) */
 body.vs-dragging::after {
