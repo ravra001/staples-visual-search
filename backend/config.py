@@ -101,7 +101,7 @@ IMAGES_BASE_URL = (_val("IMAGES_BASE_URL", "images.base_url", "") or "").rstrip(
 # not EMBEDDING_BACKEND=vertex is active) -- Gemini and the multimodal
 # embedding model are separate Vertex APIs, same project/credentials.
 AGENT_ENABLED = _bool_val("AGENT_ENABLED", "agent.enabled", True)
-AGENT_MODEL = _val("AGENT_MODEL", "agent.model", "gemini-2.0-flash-001")
+AGENT_MODEL = _val("AGENT_MODEL", "agent.model", "gemini-2.5-flash")
 AGENT_MAX_ITERATIONS = int(_val("AGENT_MAX_ITERATIONS", "agent.max_iterations", 3))
 
 
