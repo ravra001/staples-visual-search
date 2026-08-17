@@ -161,8 +161,11 @@ def _mem_by_skus(skus):
     """Batch lookup — returns {sku: product} for the found skus (single pass)."""
     return {s: _BY_SKU[s] for s in skus if s in _BY_SKU}
 
-def _mem_by_category(category):
-    return [p for p in PRODUCTS if p["category"] == category]
+def _mem_by_category(category, order_by_price=False):
+    items = [p for p in PRODUCTS if p["category"] == category]
+    if order_by_price:
+        items = sorted(items, key=lambda p: p.get("price") or float("inf"))
+    return items
 
 def _mem_search(query):
     """AND-across-terms substring match, ordered by relevance (how many

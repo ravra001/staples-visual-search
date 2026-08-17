@@ -35,7 +35,7 @@ from sqlalchemy import (
     Column, DateTime, Float, Index, Integer, String, Text, case, create_engine,
     func, or_, select, text,
 )
-from sqlalchemy.orm import declarative_base, sessionmaker
+from sqlalchemy.orm import declarative_base, defer, sessionmaker
 from pgvector.sqlalchemy import Vector
 
 import config
@@ -141,10 +141,21 @@ def get_products_by_skus(skus):
         return {p.sku: p.as_dict() for p in rows}
 
 
-def get_products_by_category(category):
+def get_products_by_category(category, order_by_price=False):
+    """defer()s the two pgvector columns -- as_dict() never reads them, but a
+    plain `s.query(Product)` still pulls both full vectors over the wire for
+    every row (tens of MB for a ~1200-row category), the way agent.py's
+    plan_office_setup calls this up to 4x per chat turn. order_by_price pushes
+    the sort into Postgres instead of re-sorting in Python after the fact."""
     with SessionLocal() as s:
-        rows = s.query(Product).filter(Product.category == category).all()
-        return [p.as_dict() for p in rows]
+        q = (
+            s.query(Product)
+            .options(defer(Product.embedding), defer(Product.image_embedding))
+            .filter(Product.category == category)
+        )
+        if order_by_price:
+            q = q.order_by(Product.price)
+        return [p.as_dict() for p in q.all()]
 
 
 def _like_escape(term):

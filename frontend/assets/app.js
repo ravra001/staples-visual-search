@@ -1438,11 +1438,18 @@ function buildAgentModal() {
   modal.addEventListener("click", (e) => { if (e.target === modal) modal.hidden = true; });
   modal.querySelector("#vs-agent-form").addEventListener("submit", (e) => {
     e.preventDefault();
-    const input = modal.querySelector("#vs-agent-input");
+    const form = e.target;
+    const input = form.querySelector("#vs-agent-input");
     const text = input.value.trim();
-    if (!text) return;
+    if (!text || input.disabled) return;   // input.disabled: a request is already in flight
     input.value = "";
-    sendAgentMessage(text);
+    input.disabled = true;
+    form.querySelector("button").disabled = true;
+    sendAgentMessage(text).finally(() => {
+      input.disabled = false;
+      form.querySelector("button").disabled = false;
+      input.focus();
+    });
   });
 }
 
@@ -1479,6 +1486,9 @@ async function sendAgentMessage(text) {
     _agentHistory.push({ role: "model", text: data.reply || "" });
 
     let html = `<p>${esc(data.reply || "")}</p>`;
+    if (data.degraded) {
+      html += `<p class="vs-agent-degraded">Staples AI is unavailable right now — showing plain search results instead.</p>`;
+    }
     if (data.items && data.items.length) {
       html += `<div class="vs-agent-cards">${data.items.map(p => productCardHTML(p)).join("")}</div>`;
     }

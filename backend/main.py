@@ -9,7 +9,9 @@ products_data.py and embeddings.py for the two intended swap points:
                           enough that brute force stops being instant.
 """
 import os
+import sys
 import time
+import traceback
 from contextlib import asynccontextmanager
 
 import numpy as np
@@ -982,12 +984,20 @@ def _do_agent_chat(message, history):
     model = state["model"]
     contents = _history_to_contents(history) + [Content(role="user", parts=[Part.from_text(message)])]
 
-    items, bundle = [], None
-    for _ in range(config.AGENT_MAX_ITERATIONS):
-        resp = model.generate_content(contents)
+    items, bundle, seen_skus = [], None, set()
+    for i in range(config.AGENT_MAX_ITERATIONS):
+        # On the last allowed turn, force a text answer instead of letting the
+        # model start yet another tool call it'll never get to see the result
+        # of -- otherwise AGENT_MAX_ITERATIONS=3 really means "2 tool calls,
+        # then always apologize," even when the model already has everything
+        # it needs to answer. fn_calls is hard-forced to [] here (not just
+        # tools=[] on the request) so this degrades safely even if the SDK's
+        # per-call tools override doesn't behave as expected.
+        last_turn = (i == config.AGENT_MAX_ITERATIONS - 1)
+        resp = model.generate_content(contents, tools=[] if last_turn else None)
         candidate = resp.candidates[0]
         parts = candidate.content.parts
-        fn_calls = [p.function_call for p in parts if p.function_call]
+        fn_calls = [] if last_turn else [p.function_call for p in parts if p.function_call]
 
         if not fn_calls:
             reply = "".join(p.text for p in parts if p.text).strip()
@@ -1000,16 +1010,25 @@ def _do_agent_chat(message, history):
             args = dict(fc.args)
             if name == "search_products":
                 result = _hybrid_search(args.get("query", ""), limit=8)
-                items = result["items"]
                 bundle = None
-                tool_result = {"count": result["count"], "items": agent.trim_items_for_model(items)}
+                tool_result = {"count": result["count"], "items": agent.trim_items_for_model(result["items"])}
+                new_items = result["items"]
             elif name == "plan_office_setup":
                 bundle = agent.plan_office_setup(args.get("people_count"), args.get("budget"))
-                items = [i for i in (bundle.get("desk"), bundle.get("chair"), bundle.get("shared_item"),
-                                      bundle.get("closest_desk"), bundle.get("closest_chair")) if i]
-                tool_result = bundle
+                tool_result = agent.trim_bundle_for_model(bundle)
+                new_items = [v for k in ("desk", "chair", "shared_item", "closest_desk", "closest_chair")
+                             if (v := bundle.get(k))]
             else:
                 tool_result = {"error": f"unknown tool {name}"}
+                new_items = []
+            # Accumulate + dedupe by sku rather than overwrite -- a single
+            # turn can chain multiple search calls ("I need a desk and a
+            # lamp"), and overwriting silently dropped the earlier results'
+            # cards even though the reply text still referenced them.
+            for item in new_items:
+                if item["sku"] not in seen_skus:
+                    seen_skus.add(item["sku"])
+                    items.append(item)
             response_parts.append(Part.from_function_response(name=name, response=tool_result))
         contents.append(Content(role="function", parts=response_parts))
 
@@ -1017,6 +1036,10 @@ def _do_agent_chat(message, history):
         "reply": "I looked into a few options but couldn't narrow it down — try being more specific.",
         "items": items, "bundle": bundle,
     }
+
+
+_AGENT_MAX_MESSAGE_CHARS = 500
+_AGENT_MAX_HISTORY_TURNS = 8   # last N turns only -- also bounds Vertex token spend per request
 
 
 @app.post("/api/agent/chat")
@@ -1029,19 +1052,33 @@ async def agent_chat(body: AgentChatRequest):
     message = (body.message or "").strip()
     if not message:
         raise HTTPException(400, "message is required")
+    if len(message) > _AGENT_MAX_MESSAGE_CHARS:
+        raise HTTPException(400, f"message is too long (limit {_AGENT_MAX_MESSAGE_CHARS} characters)")
+    # This is a public, unauthenticated endpoint that spends real Vertex
+    # tokens per call -- an unbounded client-supplied history is an easy way
+    # to balloon that cost (or just break generate_content on a request
+    # that's grown too large) for a demo URL that ends up in a chat somewhere.
+    history = (body.history or [])[-_AGENT_MAX_HISTORY_TURNS:]
 
     try:
-        return await run_in_threadpool(_do_agent_chat, message, body.history)
-    except Exception as e:
+        return await run_in_threadpool(_do_agent_chat, message, history)
+    except Exception:
         # Swallowed on purpose (falls back to plain search below) but must be
-        # logged -- an unlogged except here means Vertex/Gemini could be
-        # broken indefinitely with the demo silently degraded and no signal
-        # in Cloud Logging to say why.
-        print(f"[agent] _do_agent_chat failed, falling back to hybrid search: {type(e).__name__}: {e}")
+        # loud about it -- an unlogged except here means Vertex/Gemini could
+        # be broken indefinitely with the demo silently degraded and no
+        # signal in Cloud Logging to say why (this bit us once already: the
+        # first live deploy used a Gemini model ID that 404'd, and the only
+        # way to find out was a manual log dig once someone noticed the
+        # replies looked generic). stderr rather than stdout so it lands at
+        # ERROR severity in Cloud Logging's default stream-to-severity
+        # mapping, not INFO -- the print() convention elsewhere in this file
+        # is for expected startup/status lines, not failures.
+        print(f"[agent] _do_agent_chat failed, falling back to hybrid search:\n{traceback.format_exc()}",
+              file=sys.stderr)
         result = _hybrid_search(message, limit=8)
         reply = (f"Here's what I found for \"{message}\"." if result["count"]
                  else f"I couldn't find anything for \"{message}\" — try different words.")
-        return {"reply": reply, "items": result["items"], "bundle": None}
+        return {"reply": reply, "items": result["items"], "bundle": None, "degraded": True}
 
 
 # ---------- static assets ----------

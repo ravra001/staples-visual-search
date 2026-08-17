@@ -785,6 +785,7 @@ a { color: inherit; text-decoration: none; }
 .vs-agent-msg p { margin: 0 0 8px; }
 .vs-agent-msg-user { align-self: flex-end; background: var(--staples-red); color: #fff; border-radius: 14px 14px 2px 14px; padding: 8px 12px; }
 .vs-agent-msg-model { align-self: flex-start; background: var(--bg-light, #f4f4f4); border-radius: 14px 14px 14px 2px; padding: 8px 12px; }
+.vs-agent-degraded { font-size: 11.5px; color: var(--gray-text); font-style: italic; }
 .vs-agent-cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 10px; margin-top: 4px; }
 .vs-agent-cards .product-card { font-size: 12px; }
 .vs-agent-add-bundle {
