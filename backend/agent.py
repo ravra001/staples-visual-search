@@ -84,7 +84,7 @@ import time
 import traceback
 
 import config
-from products_data import get_product_by_sku, get_products_by_category
+from products_data import get_all_products, get_product_by_sku, get_products_by_category
 
 _agent_state = {}
 
@@ -125,6 +125,7 @@ def _get_agent_model():
         _search_products_decl(), _plan_office_setup_decl(), _plan_room_setup_decl(),
         _shop_the_room_decl(), _match_shopping_list_decl(), _complete_the_look_decl(),
         _not_shoppable_decl(), _swap_bundle_item_decl(),
+        _find_similar_decl(), _find_deals_decl(), _compare_products_decl(),
     ])
     system_instruction = (
             "You are Staples AI, a shopping assistant for an office-supply and furniture catalog. "
@@ -162,8 +163,13 @@ def _get_agent_model():
             "Use complete_the_look when the user references a specific product (by name/sku from "
             "context or a prior search result) and asks what else goes with it, e.g. 'what else do I "
             "need for this desk?' -- search_products first if you don't already have its sku. "
+            "Use find_deals when the user asks about discounts/sales, e.g. 'what's on sale in "
+            "lighting?' or 'anything over 30% off?'. "
             "Keep replies to 2-3 sentences. Never state a specific price or SKU yourself -- the "
-            "product cards already shown to the user have that; just refer to items by name. "
+            "product cards already shown to the user have that; just refer to items by name. The ONE "
+            "exception is compare_products: when narrating its result, DO state the real prices/"
+            "ratings/review counts it returned, since comparing them numerically is the whole point of "
+            "that tool. "
             "Some user messages will start with a bracketed [Context: ...] block listing what's "
             "currently shown on screen -- use it silently to resolve references like 'the second one' "
             "(e.g. by calling search_products with a refined query), but never quote or describe that "
@@ -171,7 +177,12 @@ def _get_agent_model():
             "specific item already shown -- 'make the desk cheaper', 'a nicer chair', 'that but "
             "better' -- use swap_bundle_item with its sku from context and direction 'cheaper' or "
             "'nicer', instead of a fresh search_products call; it finds a real alternative in the same "
-            "category rather than a possibly-unrelated new search result."
+            "category rather than a possibly-unrelated new search result. If instead the user describes "
+            "a STYLE/COLOR change or gives an explicit price cap for one known item -- 'the same rug "
+            "but in blue', 'like that chair but under $100' -- use find_similar (sku + refine_text and/"
+            "or max_price) instead; swap_bundle_item only moves along price/quality, it can't match a "
+            "style or color change. Use compare_products when the user asks to compare 2-4 specific "
+            "known products, e.g. 'which of these is better' -- pass their skus from context."
     )
 
     last_err = None
@@ -346,15 +357,83 @@ def _swap_bundle_item_decl():
     )
 
 
+def _find_similar_decl():
+    from vertexai.generative_models import FunctionDeclaration
+    return FunctionDeclaration(
+        name="find_similar",
+        description=(
+            "Find visually similar alternatives to one specific product already known from this "
+            "conversation (by sku), optionally refined by style/color text and/or a max price -- "
+            "e.g. 'like that one but warmer' or 'the same rug but under $150'. For plain 'cheaper'/"
+            "'nicer' pushback with no style change, use swap_bundle_item instead."
+        ),
+        parameters={
+            "type": "object",
+            "properties": {
+                "sku": {"type": "string", "description": "The SKU of the product to find alternatives to"},
+                "refine_text": {"type": "string", "description": "Optional style/color refinement, e.g. 'in black' or 'more modern'. Leave empty if none given."},
+                "max_price": {"type": "number", "description": "Optional maximum price. Leave unset if no budget given."},
+            },
+            "required": ["sku"],
+        },
+    )
+
+
+def _find_deals_decl():
+    from vertexai.generative_models import FunctionDeclaration
+    return FunctionDeclaration(
+        name="find_deals",
+        description=(
+            "Find the biggest real discounts (list price vs current price) in the catalog, "
+            "optionally scoped to one category and/or a minimum discount percentage -- e.g. "
+            "'what's on sale in lighting?' or 'anything over 30% off?'."
+        ),
+        parameters={
+            "type": "object",
+            "properties": {
+                "category": {"type": "string", "description": "Optional category to scope to, e.g. 'lighting'. Leave empty to search the whole catalog."},
+                "min_discount_pct": {"type": "number", "description": "Optional minimum discount percentage, e.g. 30 for '30% off or more'."},
+            },
+        },
+    )
+
+
+def _compare_products_decl():
+    from vertexai.generative_models import FunctionDeclaration
+    return FunctionDeclaration(
+        name="compare_products",
+        description=(
+            "Pull real price/rating/review data for 2-4 specific products (by sku, from context or a "
+            "prior result) so you can write a genuine tradeoff comparison between them."
+        ),
+        parameters={
+            "type": "object",
+            "properties": {
+                "skus": {
+                    "type": "array",
+                    "description": "2 to 4 product SKUs to compare",
+                    "items": {"type": "string"},
+                },
+            },
+            "required": ["skus"],
+        },
+    )
+
+
 def trim_items_for_model(items, cap=8):
     """Full _serialize()'d product dicts include description, image_url,
     list_price, savings_pct -- thousands of wasted tokens per turn feeding
     that back to the model. It only needs enough to talk about the items;
-    the FULL objects still go to the browser separately for card rendering."""
+    the FULL objects still go to the browser separately for card rendering.
+    Includes rating/reviews -- compare_products specifically needs real
+    numbers to compare on (see its system-prompt carve-out: it's the one
+    tool allowed to state them), and every other tool narrating "highly
+    rated" benefits from actually knowing the number too."""
     out = []
     for p in items[:cap]:
         d = {"sku": p["sku"], "name": p["name"], "brand": p.get("brand", ""),
-             "price": p["price"], "category": p["category"]}
+             "price": p["price"], "category": p["category"],
+             "rating": p.get("rating"), "reviews": p.get("reviews")}
         if "requested_qty" in p:   # set by match_shopping_list -- worth the model knowing
             d["requested_qty"] = p["requested_qty"]
         if "style_matched" in p:   # set by plan_room_setup -- worth the model knowing
@@ -722,3 +801,52 @@ def swap_bundle_item(sku, direction):
         "old_item": current, "new_item": new_item,
         "price_delta": round(new_item["price"] - current["price"], 2),
     }
+
+
+def _discount_pct(p):
+    list_price = p.get("list_price") or 0
+    return round(100 * (list_price - p.get("price", 0)) / list_price) if list_price > 0 else 0
+
+
+def find_deals(category=None, min_discount_pct=None):
+    """Real discount data (list_price vs price), not a model guess -- same
+    deterministic-math philosophy as every other tool here. category is
+    optional (catalog-wide if omitted) -- get_all_products/
+    get_products_by_category both defer the pgvector columns, so a
+    catalog-wide call doesn't drag 10k rows of embedding data over the
+    wire for fields never read here."""
+    category = (category or "").strip().lower() or None
+    pool = get_products_by_category(category) if category else get_all_products()
+    if not pool:
+        return {"feasible": False, "reason": f"No products found{f' in {category!r}' if category else ''}."}
+
+    deals = sorted(pool, key=_discount_pct, reverse=True)
+    if min_discount_pct is not None:
+        try:
+            floor = float(min_discount_pct)
+            deals = [p for p in deals if _discount_pct(p) >= floor]
+        except (TypeError, ValueError):
+            pass
+
+    top = deals[:8]
+    if not top:
+        return {"feasible": False, "category": category, "min_discount_pct": min_discount_pct,
+                "reason": "Nothing meets that discount threshold right now."}
+    return {"feasible": True, "category": category, "min_discount_pct": min_discount_pct, "items": top}
+
+
+def compare_products(skus):
+    """Real product data for 2-4 known skus, not model-recalled numbers --
+    same principle as every other tool here: the model decides WHAT to
+    compare, plain lookups supply the real prices/ratings/reviews it
+    compares them ON (see the system prompt's compare_products carve-out
+    -- the one tool allowed to state real numbers back to the user)."""
+    skus = [str(s).strip() for s in (skus or []) if s and str(s).strip()][:4]
+    found, missing = [], []
+    for sku in skus:
+        p = get_product_by_sku(sku)
+        if p:
+            found.append(p)
+        else:
+            missing.append(sku)
+    return {"feasible": len(found) >= 2, "items": found, "missing": missing}

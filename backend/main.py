@@ -1306,6 +1306,48 @@ def _do_agent_chat(message, history, last_items=None, image_bytes=None, image_mi
                 _serialize_bundle_items(result, "old_item", "new_item")
                 tool_result = agent.trim_swap_for_model(result)
                 new_items = [result["new_item"]] if result.get("feasible") else []
+            elif name == "find_similar":
+                sku = str(args.get("sku", "")).strip()
+                refine_text = str(args.get("refine_text", "") or "").strip()
+                matches = _do_similar_search(sku, 8, refine_text) if sku else None
+                if matches is None:
+                    tool_result = {"error": f"Unknown sku {sku!r} -- search_products first to find a real one."}
+                    new_items = []
+                else:
+                    by_sku = get_products_by_skus([s for s, _ in matches])
+                    result_items = []
+                    for s, score in matches:
+                        p = by_sku.get(s)
+                        if p:
+                            item = _serialize(p)
+                            item["match_score"] = round(score * 100, 1)
+                            result_items.append(item)
+                    max_price = args.get("max_price")
+                    if max_price is not None:
+                        try:
+                            max_price = float(max_price)
+                            # "but under $X" -- cheapest-first within the
+                            # visually-similar pool, same reasoning as the
+                            # "Similar for less" rail: a straight filter left
+                            # in similarity-rank order rarely felt distinct
+                            # from an unfiltered list.
+                            result_items = sorted(
+                                [i for i in result_items if i["price"] <= max_price],
+                                key=lambda i: i["price"])
+                        except (TypeError, ValueError):
+                            pass
+                    bundle = None
+                    tool_result = {"count": len(result_items), "items": agent.trim_items_for_model(result_items)}
+                    new_items = result_items
+            elif name == "find_deals":
+                bundle = agent.find_deals(args.get("category"), args.get("min_discount_pct"))
+                tool_result = agent.trim_room_bundle_for_model(bundle)
+                new_items = list(bundle.get("items") or [])
+            elif name == "compare_products":
+                result = agent.compare_products(args.get("skus") or [])
+                new_items = [_serialize(p) for p in result["items"]]
+                tool_result = {"feasible": result["feasible"], "missing": result["missing"],
+                                "items": agent.trim_items_for_model(new_items, cap=4)}
             else:
                 tool_result = {"error": f"unknown tool {name}"}
                 new_items = []

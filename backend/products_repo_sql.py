@@ -122,13 +122,22 @@ class CategoryCentroid(Base):
 # --------------------------------------------------------------------------
 
 def get_all_products():
+    """defer()s the two pgvector columns -- see get_products_by_category's
+    docstring for why. This is the widest-blast-radius of the un-deferred
+    lookups (used by /api/products' memory-backend fallback, catalog
+    hashing, and any category-less bulk read), so a caller that fetches
+    the WHOLE catalog through here -- e.g. a catalog-wide find_deals with
+    no category filter -- doesn't drag two full embedding vectors per row
+    (10k rows) over the wire for data as_dict() never reads anyway."""
     with SessionLocal() as s:
-        return [p.as_dict() for p in s.query(Product).all()]
+        rows = s.query(Product).options(defer(Product.embedding), defer(Product.image_embedding)).all()
+        return [p.as_dict() for p in rows]
 
 
 def get_product_by_sku(sku):
     with SessionLocal() as s:
-        p = s.get(Product, sku)
+        p = (s.query(Product).options(defer(Product.embedding), defer(Product.image_embedding))
+             .filter(Product.sku == sku).first())
         return p.as_dict() if p else None
 
 
@@ -138,7 +147,8 @@ def get_products_by_skus(skus):
     if not skus:
         return {}
     with SessionLocal() as s:
-        rows = s.query(Product).filter(Product.sku.in_(skus)).all()
+        rows = (s.query(Product).options(defer(Product.embedding), defer(Product.image_embedding))
+                .filter(Product.sku.in_(skus)).all())
         return {p.sku: p.as_dict() for p in rows}
 
 
