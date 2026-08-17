@@ -1408,6 +1408,13 @@ function renderMobileScanLanding() {
 // action worth adding here.
 let _agentModalBuilt = false;
 let _agentHistory = []; // [{role: "user"|"model", text}] -- kept in memory only, resets on page load
+// Whatever product cards are currently rendered in the chat panel -- resent
+// with every follow-up so the backend can fold a "here's what's on screen"
+// note into the model's context (see _build_screen_context in main.py).
+// Without this, a follow-up like "cheaper than that" or "just the chair"
+// has nothing to resolve against, since the model is told not to state
+// prices/skus itself and so never actually learns what it showed.
+let _agentLastItems = [];
 
 function buildAgentModal() {
   if (_agentModalBuilt) return;
@@ -1477,13 +1484,18 @@ async function sendAgentMessage(text) {
     const res = await fetch(`${API_BASE}/api/agent/chat`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ message: text, history: _agentHistory }),
+      body: JSON.stringify({ message: text, history: _agentHistory, last_items: _agentLastItems }),
     });
     if (!res.ok) throw new Error("Staples AI is unavailable right now.");
     const data = await res.json();
 
     _agentHistory.push({ role: "user", text });
     _agentHistory.push({ role: "model", text: data.reply || "" });
+    // Only what's about to render below counts as "on screen" for the next
+    // follow-up -- replaced each turn, not accumulated across turns.
+    _agentLastItems = (data.items || []).map(p => (
+      { sku: p.sku, name: p.name, price: p.price, category: p.category }
+    ));
 
     let html = `<p>${esc(data.reply || "")}</p>`;
     if (data.degraded) {

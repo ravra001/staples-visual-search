@@ -959,6 +959,13 @@ async def visual_search(request: Request, file: UploadFile = File(...),
 class AgentChatRequest(BaseModel):
     message: str
     history: list[dict] = []
+    # SKU/name/price/category of whatever product cards are currently
+    # rendered in the chat panel (the frontend resends its last response's
+    # `items` verbatim) -- lets the model resolve "the second one" / "cheaper
+    # than that" / "just the chair" without re-searching blind. See
+    # _build_screen_context. Untrusted client input: only the four fields
+    # below are ever read out of each entry.
+    last_items: list[dict] = []
 
 
 def _history_to_contents(history):
@@ -972,7 +979,34 @@ def _history_to_contents(history):
     return contents
 
 
-def _do_agent_chat(message, history):
+def _build_screen_context(last_items):
+    """A short "here's what the user is currently looking at" preamble,
+    prepended to the user's new message (same turn, not a separate one --
+    avoids fussing with Gemini's alternating-role turn requirement). Without
+    this, the model never learns the price/sku of anything it showed (the
+    system prompt deliberately tells it not to state prices itself), so a
+    follow-up like "cheaper than that" or "just the chair" has nothing to
+    resolve against."""
+    if not last_items:
+        return ""
+    lines = []
+    for it in last_items[:12]:
+        if not isinstance(it, dict) or not it.get("sku"):
+            continue
+        name = str(it.get("name", ""))[:120]
+        price = it.get("price")
+        price_str = f"${price:.2f}" if isinstance(price, (int, float)) else "price unknown"
+        lines.append(f"- {name} ({price_str}, category: {it.get('category', '')}, sku: {it['sku']})")
+    if not lines:
+        return ""
+    return (
+        "[Context -- currently shown to the user on screen, not something they typed. "
+        "Use this ONLY to resolve references like \"the second one\" or \"cheaper than that\"; "
+        "never read this list back to the user verbatim.]\n" + "\n".join(lines) + "\n\n"
+    )
+
+
+def _do_agent_chat(message, history, last_items=None):
     """Tool-calling loop: ask Gemini, and when it calls a tool, run the
     REAL implementation in-process (_hybrid_search for search_products,
     agent.plan_office_setup for plan_office_setup) and feed the real
@@ -982,7 +1016,8 @@ def _do_agent_chat(message, history):
 
     state = agent._get_agent_model()
     model = state["model"]
-    contents = _history_to_contents(history) + [Content(role="user", parts=[Part.from_text(message)])]
+    prefixed_message = _build_screen_context(last_items) + message
+    contents = _history_to_contents(history) + [Content(role="user", parts=[Part.from_text(prefixed_message)])]
 
     items, bundle, seen_skus = [], None, set()
     for i in range(config.AGENT_MAX_ITERATIONS):
@@ -1059,9 +1094,10 @@ async def agent_chat(body: AgentChatRequest):
     # to balloon that cost (or just break generate_content on a request
     # that's grown too large) for a demo URL that ends up in a chat somewhere.
     history = (body.history or [])[-_AGENT_MAX_HISTORY_TURNS:]
+    last_items = (body.last_items or [])[:12]
 
     try:
-        return await run_in_threadpool(_do_agent_chat, message, history)
+        return await run_in_threadpool(_do_agent_chat, message, history, last_items)
     except Exception:
         # Swallowed on purpose (falls back to plain search below) but must be
         # loud about it -- an unlogged except here means Vertex/Gemini could

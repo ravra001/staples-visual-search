@@ -61,7 +61,11 @@ def _get_agent_model():
             "Use search_products to find products by keyword or description. Use plan_office_setup "
             "when the user gives a headcount and a budget for furnishing an office. Keep replies to "
             "2-3 sentences. Never state a specific price or SKU yourself -- the product cards already "
-            "shown to the user have that; just refer to items by name."
+            "shown to the user have that; just refer to items by name. Some user messages will start "
+            "with a bracketed [Context: ...] block listing what's currently shown on screen -- use it "
+            "silently to resolve references like 'the second one' or 'cheaper than that' (e.g. by "
+            "calling search_products with a refined query), but never quote or describe that block back "
+            "to the user; it isn't something they wrote."
         ),
     )
     _agent_state.update(model=model, Tool=Tool)
