@@ -1033,7 +1033,7 @@ def _do_agent_chat(message, history, last_items=None, image_bytes=None, image_mi
     state = agent._get_agent_model()
     model = state["model"]
     prefixed_message = _build_screen_context(last_items) + message
-    turn_parts = [Part.from_text(prefixed_message)]
+    turn_parts = [Part.from_text(prefixed_message)] if prefixed_message else []
     if image_bytes:
         turn_parts.append(Part.from_data(data=image_bytes, mime_type=image_mime or "image/jpeg"))
     contents = _history_to_contents(history) + [Content(role="user", parts=turn_parts)]
@@ -1048,7 +1048,28 @@ def _do_agent_chat(message, history, last_items=None, image_bytes=None, image_mi
         # tools=[] on the request) so this degrades safely even if the SDK's
         # per-call tools override doesn't behave as expected.
         last_turn = (i == config.AGENT_MAX_ITERATIONS - 1)
-        resp = model.generate_content(contents, tools=[] if last_turn else None)
+        call_kwargs = {"tools": [] if last_turn else None}
+        if i == 0 and image_bytes and not last_turn:
+            # A photo with no caption (or a caption that doesn't say what to
+            # do with it) shouldn't depend on the model choosing, unprompted,
+            # to call a tool instead of just describing the picture in prose
+            # -- that's a real failure mode: "attach a photo and nothing
+            # happens." Force the FIRST turn to actually call one of the two
+            # image-aware tools; the model still decides which (room vs
+            # list), it just can't opt out of resolving the image against
+            # the real catalog.
+            try:
+                from vertexai.generative_models import ToolConfig
+                call_kwargs["tool_config"] = ToolConfig(
+                    function_calling_config=ToolConfig.FunctionCallingConfig(
+                        mode=ToolConfig.FunctionCallingConfig.Mode.ANY,
+                        allowed_function_names=["shop_the_room", "match_shopping_list"],
+                    )
+                )
+            except Exception:
+                print(f"[agent] could not build forced tool_config for an image turn:\n{traceback.format_exc()}",
+                      file=sys.stderr)
+        resp = model.generate_content(contents, **call_kwargs)
         candidate = resp.candidates[0]
         parts = candidate.content.parts
         fn_calls = [] if last_turn else [p.function_call for p in parts if p.function_call]
