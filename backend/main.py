@@ -19,6 +19,7 @@ from contextlib import asynccontextmanager
 import numpy as np
 import config
 import agent
+from text_match import singularize
 from fastapi import FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
@@ -1031,20 +1032,6 @@ def _build_screen_context(last_items):
 _STOPWORDS = {"the", "and", "for", "with", "some", "any", "get", "buy", "need", "please"}
 
 
-def _singularize(word):
-    """Cheap plural stripping, not a real stemmer -- "staplers" -> "stapler",
-    "lamps" -> "lamp", "boxes" -> "box". Doesn't need to be linguistically
-    complete, just needs to stop a plural query word from failing a
-    singular product name's substring check."""
-    if word.endswith("ies") and len(word) > 4:
-        return word[:-3] + "y"
-    if word.endswith(("ses", "xes", "ches", "shes")) and len(word) > 4:
-        return word[:-2]
-    if word.endswith("s") and not word.endswith("ss") and len(word) > 3:
-        return word[:-1]
-    return word
-
-
 def _plausible_match(query, item):
     """_hybrid_search's RRF fusion has no natural reject threshold -- it
     returns SOMETHING for almost any string, since the semantic side always
@@ -1052,19 +1039,17 @@ def _plausible_match(query, item):
     relevant. Taking its top-1 unfiltered meant match_shopping_list could
     confidently resolve a scribbled "milk" to an office chair, and the
     unmatched list -- meant to be an honest signal -- would almost never
-    populate. Require at least one real query word (or its singular form)
-    to actually appear in the matched product's own name/category text,
-    mirroring the substring logic the keyword side of search already uses.
-    The singular check matters in practice: "5 staplers" -> word "staplers"
-    -> real match is "Swingline Stapler" (singular) -> a bare substring
-    check fails and falsely reports it as unmatched. Imperfect (misses
-    pure synonyms like "sofa" matching a product only ever named "couch"),
-    but a real floor where there was none."""
+    populate. Require at least one real query word (or its singular form,
+    see text_match.singularize) to actually appear in the matched
+    product's own name/category text, mirroring the substring logic the
+    keyword side of search already uses. Imperfect (misses pure synonyms
+    like "sofa" matching a product only ever named "couch"), but a real
+    floor where there was none."""
     words = [w for w in re.split(r"\W+", query.lower()) if len(w) > 2 and w not in _STOPWORDS]
     if not words:
         return True
     haystack = f"{item.get('name', '')} {item.get('category', '')}".lower()
-    return any(w in haystack or _singularize(w) in haystack for w in words)
+    return any(w in haystack or singularize(w) in haystack for w in words)
 
 
 def _do_agent_chat(message, history, last_items=None, image_bytes=None, image_mime=None):

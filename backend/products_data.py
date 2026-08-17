@@ -17,6 +17,7 @@ import json
 import os
 
 import config
+from text_match import singularize
 
 # category -> (base_color RGB, accent_color RGB, shape) used by the image generator
 CATEGORY_STYLE = {
@@ -172,7 +173,14 @@ def _mem_search(query):
     terms matched in the NAME specifically -- a stronger signal than a term
     only appearing in the description) rather than left in arbitrary
     catalog order. See products_repo_sql.search_products_ranked_skus for
-    the sql-backend equivalent; both feed main.py's hybrid text_search."""
+    the sql-backend equivalent; both feed main.py's hybrid text_search.
+
+    Each term also tries its singular form (text_match.singularize) --
+    without this, a plural query term ("monitors") that never appears
+    verbatim in any product's real text (products are named "Monitor
+    Stand", singular) fails this AND-check entirely, contributing NOTHING
+    to the keyword side of the hybrid search even though real matches
+    exist under the singular form."""
     q = (query or "").strip().lower()
     if not q:
         return []
@@ -180,9 +188,9 @@ def _mem_search(query):
     scored = []
     for p in PRODUCTS:
         haystack = f"{p['name']} {p.get('brand', '')} {p['category']} {p.get('description', '')}".lower()
-        if all(t in haystack for t in terms):
+        if all(t in haystack or singularize(t) in haystack for t in terms):
             name_l = p["name"].lower()
-            relevance = sum(1 for t in terms if t in name_l)
+            relevance = sum(1 for t in terms if t in name_l or singularize(t) in name_l)
             scored.append((relevance, p))
     scored.sort(key=lambda pair: -pair[0])
     return [p for _relevance, p in scored]

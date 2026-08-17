@@ -40,6 +40,7 @@ from pgvector.sqlalchemy import Vector
 
 import config
 from embeddings import embedding_dim
+from text_match import singularize
 
 DATABASE_URL = config.DATABASE_URL
 if not DATABASE_URL:
@@ -164,6 +165,35 @@ def _like_escape(term):
     return term.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
 
 
+def _term_like_patterns(term):
+    """The term as typed, plus its singular form (text_match.singularize)
+    if different -- without this, a plural query term ("monitors") that
+    never appears verbatim in any product's real text (products are named
+    "Monitor Stand", singular) matches NOTHING, contributing zero signal
+    to the keyword side of hybrid search even though real matches exist
+    under the singular form. Verified live: "monitors"/"notebooks" ranked
+    completely differently from "monitor"/"notebook" for exactly this
+    reason, despite the catalog having real matches for both."""
+    patterns = [f"%{_like_escape(term)}%"]
+    singular = singularize(term)
+    if singular != term:
+        patterns.append(f"%{_like_escape(singular)}%")
+    return patterns
+
+
+def _term_match_condition(term):
+    """OR across all four searched fields AND both singular/plural forms."""
+    conditions = []
+    for like in _term_like_patterns(term):
+        conditions += [
+            func.lower(Product.name).like(like, escape="\\"),
+            func.lower(Product.brand).like(like, escape="\\"),
+            func.lower(Product.category).like(like, escape="\\"),
+            func.lower(Product.description).like(like, escape="\\"),
+        ]
+    return or_(*conditions)
+
+
 def search_products(query):
     q = (query or "").strip()
     if not q:
@@ -172,13 +202,7 @@ def search_products(query):
         # AND across terms, each matched against name/brand/description.
         stmt = s.query(Product)
         for term in q.lower().split():
-            like = f"%{_like_escape(term)}%"
-            stmt = stmt.filter(or_(
-                func.lower(Product.name).like(like, escape="\\"),
-                func.lower(Product.brand).like(like, escape="\\"),
-                func.lower(Product.category).like(like, escape="\\"),
-                func.lower(Product.description).like(like, escape="\\"),
-            ))
+            stmt = stmt.filter(_term_match_condition(term))
         return [p.as_dict() for p in stmt.all()]
 
 
@@ -199,14 +223,9 @@ def search_products_ranked_skus(query, limit=100):
         stmt = select(Product.sku)
         name_hit_terms = []
         for term in q.lower().split():
-            like = f"%{_like_escape(term)}%"
-            stmt = stmt.where(or_(
-                func.lower(Product.name).like(like, escape="\\"),
-                func.lower(Product.brand).like(like, escape="\\"),
-                func.lower(Product.category).like(like, escape="\\"),
-                func.lower(Product.description).like(like, escape="\\"),
-            ))
-            name_hit_terms.append(case((func.lower(Product.name).like(like, escape="\\"), 1), else_=0))
+            stmt = stmt.where(_term_match_condition(term))
+            name_like_conditions = [func.lower(Product.name).like(p, escape="\\") for p in _term_like_patterns(term)]
+            name_hit_terms.append(case((or_(*name_like_conditions), 1), else_=0))
         relevance = sum(name_hit_terms[1:], name_hit_terms[0]) if name_hit_terms else 0
         stmt = stmt.order_by(relevance.desc(), Product.sku).limit(limit)
         return [row[0] for row in s.execute(stmt).all()]
