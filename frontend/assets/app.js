@@ -1514,9 +1514,16 @@ async function sendAgentMessage(text) {
     if (bundleBtn) {
       bundleBtn.addEventListener("click", () => {
         const b = data.bundle;
-        addToCart(b.desk.sku, data.bundle.people_count);
-        addToCart(b.chair.sku, data.bundle.people_count);
-        if (b.shared_item) addToCart(b.shared_item.sku, 1);
+        if (b.items) {
+          // plan_room_setup shape: one of each item in the flat `items` list.
+          b.items.forEach(item => addToCart(item.sku, 1));
+        } else {
+          // plan_office_setup shape: N desks + N chairs for the headcount,
+          // one shared item.
+          addToCart(b.desk.sku, b.people_count);
+          addToCart(b.chair.sku, b.people_count);
+          if (b.shared_item) addToCart(b.shared_item.sku, 1);
+        }
         bundleBtn.textContent = "Added ✓";
         bundleBtn.disabled = true;
       });

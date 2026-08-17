@@ -3,7 +3,7 @@ Staples AI — tool-calling chat agent.
 
 Runs in-process inside the same FastAPI app/Cloud Run service as
 everything else (see main.py's /api/agent/chat and _do_agent_chat) — no
-separate service, no new deployment. Deliberately narrow: exactly two
+separate service, no new deployment. Deliberately narrow: exactly three
 LLM-callable tools.
 
   search_products       — thin wrapper the ORCHESTRATION loop (main.py)
@@ -16,6 +16,15 @@ LLM-callable tools.
                            already applies to price-intent parsing
                            (_parsePriceIntent in app.js): the model
                            extracts intent, plain code does the math.
+                           Scoped narrowly to N-desks + N-chairs for a
+                           headcount -- NOT a general room planner.
+  plan_room_setup        — the general case plan_office_setup deliberately
+                           isn't: one item per relevant category for a
+                           whole room (living room, bedroom, etc), with an
+                           optional style/color term, within a budget.
+                           Same deterministic-math philosophy; style
+                           matching is a plain substring filter over
+                           catalog text, not a model judgment call.
 
 Cart-adding is NOT a tool. A single searched product already has a
 working Add-to-cart button on its product card (see productCardHTML in
@@ -25,6 +34,8 @@ plan_office_setup bundle in one action — is a plain frontend button
 keyed off the presence of a `bundle` in the response, not something the
 model decides to call.
 """
+import re
+
 import config
 from products_data import get_products_by_category
 
@@ -52,20 +63,25 @@ def _get_agent_model():
         raise RuntimeError("Staples AI requires embedding.vertex.project in config.yaml (or GCP_PROJECT) "
                             "-- same project used for Vertex embeddings, just a different Vertex API.")
     vertexai.init(project=project, location=location)
-    tool = Tool(function_declarations=[_search_products_decl(), _plan_office_setup_decl()])
+    tool = Tool(function_declarations=[
+        _search_products_decl(), _plan_office_setup_decl(), _plan_room_setup_decl(),
+    ])
     model = GenerativeModel(
         config.AGENT_MODEL,
         tools=[tool],
         system_instruction=(
             "You are Staples AI, a shopping assistant for an office-supply and furniture catalog. "
             "Use search_products to find products by keyword or description. Use plan_office_setup "
-            "when the user gives a headcount and a budget for furnishing an office. Keep replies to "
-            "2-3 sentences. Never state a specific price or SKU yourself -- the product cards already "
-            "shown to the user have that; just refer to items by name. Some user messages will start "
-            "with a bracketed [Context: ...] block listing what's currently shown on screen -- use it "
-            "silently to resolve references like 'the second one' or 'cheaper than that' (e.g. by "
-            "calling search_products with a refined query), but never quote or describe that block back "
-            "to the user; it isn't something they wrote."
+            "ONLY when the user gives a headcount of people and a budget to furnish desks+chairs for "
+            "them (an office). Use plan_room_setup for any other whole-room or whole-space furnishing "
+            "request (living room, bedroom, dining room, entryway, etc.) with a budget, optionally "
+            "with a style or color -- do not tell the user you can't plan a room; that's what this "
+            "tool is for. Keep replies to 2-3 sentences. Never state a specific price or SKU yourself "
+            "-- the product cards already shown to the user have that; just refer to items by name. "
+            "Some user messages will start with a bracketed [Context: ...] block listing what's "
+            "currently shown on screen -- use it silently to resolve references like 'the second one' "
+            "or 'cheaper than that' (e.g. by calling search_products with a refined query), but never "
+            "quote or describe that block back to the user; it isn't something they wrote."
         ),
     )
     _agent_state.update(model=model, Tool=Tool)
@@ -103,6 +119,28 @@ def _plan_office_setup_decl():
     )
 
 
+def _plan_room_setup_decl():
+    from vertexai.generative_models import FunctionDeclaration
+    return FunctionDeclaration(
+        name="plan_room_setup",
+        description=(
+            "Plan a whole-room furniture setup (living room, bedroom, dining room, entryway, etc.) "
+            "within a total budget in USD, picking one item per relevant category. Optionally match "
+            "a style or color, e.g. 'grey' or 'mid-century modern'. Use this for any full-room "
+            "request that ISN'T specifically an office desk+chair headcount (that's plan_office_setup)."
+        ),
+        parameters={
+            "type": "object",
+            "properties": {
+                "room_type": {"type": "string", "description": "e.g. 'living room', 'bedroom', 'dining room', 'entryway', 'home office'"},
+                "budget": {"type": "number", "description": "Total budget in US dollars for the whole room"},
+                "style": {"type": "string", "description": "Optional style or color term, e.g. 'grey' or 'rustic'. Leave empty if none given."},
+            },
+            "required": ["room_type", "budget"],
+        },
+    )
+
+
 def trim_items_for_model(items, cap=8):
     """Full _serialize()'d product dicts include description, image_url,
     list_price, savings_pct -- thousands of wasted tokens per turn feeding
@@ -133,6 +171,17 @@ def trim_bundle_for_model(bundle):
         item = bundle.get(key)
         if item:
             out[key] = trim_items_for_model([item], cap=1)[0]
+    return out
+
+
+def trim_room_bundle_for_model(bundle):
+    """Same reasoning as trim_bundle_for_model, for plan_room_setup's shape
+    (a flat `items` list instead of named desk/chair/shared_item keys)."""
+    if not bundle:
+        return bundle
+    out = {k: v for k, v in bundle.items() if k != "items"}
+    if bundle.get("items"):
+        out["items"] = trim_items_for_model(bundle["items"], cap=12)
     return out
 
 
@@ -228,5 +277,113 @@ def plan_office_setup(people_count, budget):
         "feasible": True,
         "people_count": people_count, "budget": round(budget, 2),
         "desk": desk, "chair": chair, "shared_item": shared_item,
+        "total": round(total, 2), "under_by": round(budget - total, 2),
+    }
+
+
+# Maps a free-text room description to the catalog's fixed 13-category
+# taxonomy (never renamed/restructured -- see fix_catalog_categories.py's
+# self-consistency audit). Matched by substring against the user's room_type
+# text, longest/most-specific key checked first so "home office" doesn't
+# accidentally match a bare "office" entry that isn't there, and a plain
+# "office" request routes here (not to plan_office_setup, which needs a
+# headcount) for e.g. a single-person home-office room rather than N desks.
+_ROOM_TYPE_CATEGORIES = {
+    "living room": ["sofas", "tables", "rugs", "lighting", "wall_art"],
+    "home office": ["desks", "chairs", "storage", "lighting"],
+    "dining room": ["tables", "chairs", "wall_art", "lighting"],
+    "bedroom": ["furniture", "storage", "lighting", "rugs"],
+    "entryway": ["storage", "rugs", "wall_art", "lighting"],
+    "kitchen": ["kitchen", "storage", "lighting"],
+    "office": ["desks", "chairs", "storage", "lighting"],
+}
+_DEFAULT_ROOM_CATEGORIES = ["furniture", "home_decor", "lighting", "rugs"]
+
+
+def _categories_for_room(room_type):
+    key = (room_type or "").strip().lower()
+    for name in sorted(_ROOM_TYPE_CATEGORIES, key=len, reverse=True):
+        if name in key:
+            return _ROOM_TYPE_CATEGORIES[name]
+    return _DEFAULT_ROOM_CATEGORIES
+
+
+def _style_match(item, style_terms):
+    if not style_terms:
+        return True
+    haystack = f"{item.get('name', '')} {item.get('description', '')}".lower()
+    return any(t in haystack for t in style_terms)
+
+
+def plan_room_setup(room_type, budget, style=""):
+    """The general case plan_office_setup deliberately isn't: one item per
+    relevant category for a whole room, not N-of-a-pair for a headcount.
+
+    Style matching is a plain substring check against catalog name/
+    description text, not a model judgment call -- e.g. "grey" matches any
+    item whose real product text says "grey" or "gray". Falls back to the
+    category's cheapest item when nothing style-matches, rather than
+    leaving that category empty over a wording mismatch.
+
+    Strategy: cheapest (style-matched if possible) item per category first;
+    if that base set is over budget, drop the priciest category picks one
+    at a time until it fits (an honest scope reduction, not silently going
+    over); spend any leftover budget upgrading picks to better-quality
+    (still style-matched, still affordable) alternatives, cheapest-quality
+    pick first so the weakest link gets upgraded before a strong one gets
+    gold-plated.
+    """
+    try:
+        budget = max(1.0, float(budget))
+    except (TypeError, ValueError):
+        return {"feasible": False, "reason": "Could not understand the budget given."}
+
+    categories = _categories_for_room(room_type)
+    style_terms = [t for t in re.split(r"[,\s]+", (style or "").strip().lower()) if t]
+
+    picks = {}
+    for cat in categories:
+        items = get_products_by_category(cat, order_by_price=True)
+        if not items:
+            continue
+        matching = [p for p in items if _style_match(p, style_terms)]
+        picks[cat] = (matching or items)[0]
+
+    if not picks:
+        return {"feasible": False, "reason": f"The catalog has nothing available for a {room_type or 'room'} setup right now."}
+
+    while picks and sum(p["price"] for p in picks.values()) > budget:
+        worst_cat = max(picks, key=lambda c: picks[c]["price"])
+        del picks[worst_cat]
+
+    if not picks:
+        cheapest_per_category = [items[0] for cat in categories
+                                  if (items := get_products_by_category(cat, order_by_price=True))]
+        cheapest = min(cheapest_per_category, key=lambda p: p["price"], default=None)
+        return {
+            "feasible": False, "room_type": room_type, "budget": round(budget, 2),
+            "reason": "Budget is too low even for the single cheapest item.",
+            "closest_item": cheapest,
+        }
+
+    remaining = budget - sum(p["price"] for p in picks.values())
+    for cat in sorted(picks, key=lambda c: _quality_score(picks[c])):
+        items = get_products_by_category(cat, order_by_price=True)
+        matching = [p for p in items if _style_match(p, style_terms)]
+        pool = matching or items
+        current = picks[cat]
+        headroom = remaining + current["price"]
+        affordable = [p for p in pool if p["price"] <= headroom]
+        if affordable:
+            best = max(affordable, key=lambda p: (_quality_score(p), p["price"]))
+            if best["sku"] != current["sku"]:
+                remaining -= (best["price"] - current["price"])
+                picks[cat] = best
+
+    total = sum(p["price"] for p in picks.values())
+    return {
+        "feasible": True,
+        "room_type": room_type, "style": style, "budget": round(budget, 2),
+        "items": list(picks.values()),
         "total": round(total, 2), "under_by": round(budget - total, 2),
     }

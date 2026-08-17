@@ -1053,6 +1053,12 @@ def _do_agent_chat(message, history, last_items=None):
                 tool_result = agent.trim_bundle_for_model(bundle)
                 new_items = [v for k in ("desk", "chair", "shared_item", "closest_desk", "closest_chair")
                              if (v := bundle.get(k))]
+            elif name == "plan_room_setup":
+                bundle = agent.plan_room_setup(args.get("room_type", ""), args.get("budget"), args.get("style", ""))
+                tool_result = agent.trim_room_bundle_for_model(bundle)
+                new_items = list(bundle.get("items") or [])
+                if bundle.get("closest_item"):
+                    new_items.append(bundle["closest_item"])
             else:
                 tool_result = {"error": f"unknown tool {name}"}
                 new_items = []
