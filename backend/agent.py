@@ -440,11 +440,20 @@ def _categories_for_room(room_type):
     return _DEFAULT_ROOM_CATEGORIES
 
 
+_STYLE_STOPWORDS = {"the", "and", "for", "with", "style", "color", "colour", "some", "any"}
+
+
 def _style_match(item, style_terms):
+    """ALL terms must appear, not any -- verified live: "neon green plaid"
+    matched (and was reported as fully matched) on a plain "Hunter Green"
+    loveseat and a "Sea Green" lamp, neither neon nor plaid, because any()
+    let a single word ("green") stand in for the whole compound phrase.
+    Requiring every term is a real filter for a compound style description
+    instead of one word doing all the work."""
     if not style_terms:
         return True
     haystack = f"{item.get('name', '')} {item.get('description', '')}".lower()
-    return any(t in haystack for t in style_terms)
+    return all(t in haystack for t in style_terms)
 
 
 def plan_room_setup(room_type, budget, style=""):
@@ -471,7 +480,12 @@ def plan_room_setup(room_type, budget, style=""):
         return {"feasible": False, "reason": "Could not understand the budget given."}
 
     categories = _categories_for_room(room_type)
-    style_terms = [t for t in re.split(r"[,\s]+", (style or "").strip().lower()) if t]
+    # len > 2 + stopword filter: with all() requiring EVERY term to appear,
+    # an unfiltered filler word ("a", "in") would make almost every product
+    # fail the match on that word alone (barely any product text contains
+    # "a" as a whole token the way a naive substring check needs it to).
+    style_terms = [t for t in re.split(r"[,\s]+", (style or "").strip().lower())
+                   if len(t) > 2 and t not in _STYLE_STOPWORDS]
 
     picks = {}
     for cat in categories:
