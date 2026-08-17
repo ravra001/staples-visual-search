@@ -468,7 +468,16 @@ async function renderSimilarRail(elId, sku, { maxPrice, limit = 12 } = {}) {
     if (!res.ok) throw new Error("Could not load similar products");
     const data = await res.json();
     let items = data.items || [];
-    if (maxPrice != null) items = items.filter(p => p.price < maxPrice);
+    if (maxPrice != null) {
+      // Filtering to price < maxPrice alone still leaves items in
+      // similarity-rank order -- since most visually-similar items are
+      // ALREADY cheaper than a mid-to-high-priced source product, this
+      // rail ended up showing nearly the same top-12 in the same order as
+      // "Visually similar" right above it. Reordering by actual savings
+      // (cheapest/biggest-discount first) makes "for less" mean something
+      // distinct from "similar," not just a mildly filtered copy of it.
+      items = items.filter(p => p.price < maxPrice).sort((a, b) => a.price - b.price);
+    }
     items = items.slice(0, limit);
     if (!items.length) { el.closest("section")?.remove(); return; }
     el.innerHTML = items.map(p => productCardHTML(p)).join("");

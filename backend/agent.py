@@ -79,6 +79,9 @@ shopping list, in one action -- are plain frontend buttons keyed off the
 response shape, not something the model decides to call.
 """
 import re
+import sys
+import time
+import traceback
 
 import config
 from products_data import get_product_by_sku, get_products_by_category
@@ -89,7 +92,18 @@ _agent_state = {}
 def _get_agent_model():
     """Lazy-load the Gemini model once per process, mirroring
     embeddings.py's _get_vertex() pattern exactly (same project,
-    same credentials, different Vertex API)."""
+    same credentials, different Vertex API).
+
+    Retries the Vertex init + model construction once on failure -- a
+    freshly cold-started Cloud Run instance's first Vertex auth handshake
+    can transiently fail. Verified live: an otherwise-normal request
+    degraded to the plain-search fallback (11s, wrong/generic results)
+    on the first hit after the app had been idle, then an identical
+    request succeeded in under 3s a minute later. Without a same-request
+    retry, whichever user's request happens to land on a cold instance
+    eats that failure -- often literally the first visitor. A genuinely
+    persistent failure still exhausts the retry and correctly falls
+    through to the honest degraded response in main.py."""
     if _agent_state:
         return _agent_state
     try:
@@ -106,16 +120,13 @@ def _get_agent_model():
     if not project:
         raise RuntimeError("Staples AI requires embedding.vertex.project in config.yaml (or GCP_PROJECT) "
                             "-- same project used for Vertex embeddings, just a different Vertex API.")
-    vertexai.init(project=project, location=location)
+
     tool = Tool(function_declarations=[
         _search_products_decl(), _plan_office_setup_decl(), _plan_room_setup_decl(),
         _shop_the_room_decl(), _match_shopping_list_decl(), _complete_the_look_decl(),
         _not_shoppable_decl(), _swap_bundle_item_decl(),
     ])
-    model = GenerativeModel(
-        config.AGENT_MODEL,
-        tools=[tool],
-        system_instruction=(
+    system_instruction = (
             "You are Staples AI, a shopping assistant for an office-supply and furniture catalog. "
             "Use search_products to find products by keyword or description for a SINGLE item. When "
             "the user asks for MULTIPLE distinct items in one message -- typed directly, e.g. '5 "
@@ -153,10 +164,22 @@ def _get_agent_model():
             "better' -- use swap_bundle_item with its sku from context and direction 'cheaper' or "
             "'nicer', instead of a fresh search_products call; it finds a real alternative in the same "
             "category rather than a possibly-unrelated new search result."
-        ),
     )
-    _agent_state.update(model=model, Tool=Tool)
-    return _agent_state
+
+    last_err = None
+    for attempt in range(2):
+        try:
+            vertexai.init(project=project, location=location)
+            model = GenerativeModel(config.AGENT_MODEL, tools=[tool], system_instruction=system_instruction)
+            _agent_state.update(model=model, Tool=Tool)
+            return _agent_state
+        except Exception as e:
+            last_err = e
+            print(f"[agent] Vertex model init failed (attempt {attempt + 1}/2):\n{traceback.format_exc()}",
+                  file=sys.stderr)
+            if attempt == 0:
+                time.sleep(0.75)
+    raise last_err
 
 
 def _search_products_decl():
@@ -404,6 +427,32 @@ def _best_affordable(categories, budget):
     return None
 
 
+_NON_OFFICE_CHAIR_TERMS = (
+    "barstool", "bar stool", "stool", "dining chair", "accent chair",
+    "kids", "child", "teen", "toddler", "nursery", "rocking chair",
+    "recliner", "chaise", "glider", "outdoor", "patio", "garden",
+    "camping", "beach", "ottoman", "bench", "sofa", "loveseat", "floor chair",
+)
+
+
+def _office_chairs_only(chairs):
+    """The catalog's single "chairs" category (fixed taxonomy, never
+    subdivided) lumps genuine task/office chairs together with barstools,
+    dining chairs, recliners, accent chairs, etc. Verified live:
+    plan_office_setup picked a barstool -- rated 4.9 with 4,792 reviews,
+    so high-quality that swap_bundle_item's "nicer" direction correctly
+    found nothing better in the SAME category and honestly said so; the
+    real bug was the initial pick, not the swap logic. A plain name-text
+    exclusion (verified against the real catalog: 430 of 1086 "chairs"
+    remain, cheapest at $48.99 -- barely above the $32.99 unfiltered
+    cheapest, which turned out to be a recliner) is enough to fix it
+    without touching the category taxonomy itself. Falls back to the
+    unfiltered list only in the (currently unreachable, but cheap to
+    guard) case that filtering leaves nothing at all."""
+    filtered = [c for c in chairs if not any(t in c["name"].lower() for t in _NON_OFFICE_CHAIR_TERMS)]
+    return filtered or chairs
+
+
 def plan_office_setup(people_count, budget):
     """Real arithmetic against real catalog prices -- see module docstring
     for why this is deterministic Python, not something the LLM computes.
@@ -425,7 +474,7 @@ def plan_office_setup(people_count, budget):
         return {"feasible": False, "reason": "Could not understand the headcount or budget given."}
 
     desks = get_products_by_category("desks", order_by_price=True)
-    chairs = get_products_by_category("chairs", order_by_price=True)
+    chairs = _office_chairs_only(get_products_by_category("chairs", order_by_price=True))
     if not desks or not chairs:
         return {"feasible": False, "reason": "The catalog has no desks or chairs available right now."}
 

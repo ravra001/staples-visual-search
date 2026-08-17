@@ -698,6 +698,15 @@ def similar_products(sku: str, top_k: int = 12, refine_text: str = ""):
             item = _serialize(p)
             item["match_score"] = round(score * 100, 1)
             results.append(item)
+    # _search_matches RANKS by the fused-vector score but this endpoint
+    # DISPLAYS the pure-image score instead (see _display_scores) -- two
+    # different metrics that don't always agree, so the list order (by
+    # rank score) and the visible percentages (display score) could
+    # legitimately disagree, e.g. a displayed 75% sitting below a 67.6%.
+    # Correct by design, but reads as a sorting bug to anyone just looking
+    # at the numbers on screen -- if a percentage is shown, the list
+    # should be ordered by it.
+    results.sort(key=lambda r: -r["match_score"])
     return {"count": len(results), "items": results, "refine_text": refine_text or None}
 
 
@@ -948,6 +957,9 @@ async def visual_search(request: Request, file: UploadFile = File(...),
             item = _serialize(p)
             item["match_score"] = round(score * 100, 1)
             results.append(item)
+    # Same rank-vs-display-score split as similar_products -- see that
+    # endpoint's comment. Order by what's actually shown.
+    results.sort(key=lambda r: -r["match_score"])
 
     return {
         "count": len(results),
@@ -1052,6 +1064,20 @@ def _plausible_match(query, item):
     return any(w in haystack or singularize(w) in haystack for w in words)
 
 
+def _generate_with_retry(model, contents, **kwargs):
+    """One retry on any exception, same reasoning as agent._get_agent_model's
+    init retry -- a cold Vertex client's first RPC on a freshly-started
+    Cloud Run instance can transiently fail. A genuinely persistent failure
+    still exhausts this and correctly falls through to agent_chat's
+    degraded fallback; this only absorbs the one-off case."""
+    try:
+        return model.generate_content(contents, **kwargs)
+    except Exception:
+        print(f"[agent] generate_content failed, retrying once:\n{traceback.format_exc()}", file=sys.stderr)
+        time.sleep(0.75)
+        return model.generate_content(contents, **kwargs)
+
+
 def _do_agent_chat(message, history, last_items=None, image_bytes=None, image_mime=None):
     """Tool-calling loop: ask Gemini, and when it calls a tool, run the
     REAL implementation in-process (_hybrid_search for search_products,
@@ -1114,7 +1140,7 @@ def _do_agent_chat(message, history, last_items=None, image_bytes=None, image_mi
             except Exception:
                 print(f"[agent] could not build forced tool_config for an image turn:\n{traceback.format_exc()}",
                       file=sys.stderr)
-        resp = model.generate_content(contents, **call_kwargs)
+        resp = _generate_with_retry(model, contents, **call_kwargs)
         candidate = resp.candidates[0]
         parts = candidate.content.parts
         fn_calls = [] if last_turn else [p.function_call for p in parts if p.function_call]
