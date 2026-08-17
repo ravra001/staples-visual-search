@@ -1534,7 +1534,7 @@ function buildAgentModal() {
     _appendAgentMessage("model",
       `Hi! Ask me to find a product, or try something like
        <em>"set up an office for 15 people under $5000"</em>. You can also attach a
-       photo of a room to furnish, or a photo of a shopping list.`);
+       photo of a room to furnish, a shopping list, or a receipt to reorder.`);
   }
 
   const imageInput = modal.querySelector("#vs-agent-image-input");
