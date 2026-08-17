@@ -370,6 +370,65 @@
        downscaled the image client-side first.</p>
   </section>
 
+  <!-- ============ STAPLES AI ============ -->
+  <section class="arch-section">
+    <h2>Staples AI — a chat agent, not a new search engine</h2>
+    <p class="arch-lead">The "Staples AI" chat panel runs Gemini (Vertex AI) as a tool-calling
+       orchestrator <em>in-process</em>, inside this same Cloud Run service — not a separate
+       deployment. It never invents product data, prices, or matches itself: every reply is Gemini
+       deciding <em>which</em> of six tools to call and narrating what that tool's real, deterministic
+       Python implementation actually returned. The tools:</p>
+    <div class="table-scroll">
+      <table class="arch-table">
+        <thead><tr><th>Tool</th><th>What it actually calls</th></tr></thead>
+        <tbody>
+          <tr><td>search_products</td><td>The same hybrid keyword+semantic <code>_hybrid_search</code> the header search bar uses — no duplicate search logic.</td></tr>
+          <tr><td>plan_office_setup</td><td>Deterministic bundling: N desks + N chairs for a headcount, spending leftover budget on one shared storage/lighting item — see the pricing math below.</td></tr>
+          <tr><td>plan_room_setup</td><td>The general case plan_office_setup deliberately isn't: one item per relevant category for a whole room (living room, bedroom, dining room…), with an optional style/color filter.</td></tr>
+          <tr><td>complete_the_look</td><td>A thin wrapper over the existing per-category cross-sell pipeline described above.</td></tr>
+          <tr><td>shop_the_room</td><td>A photo attached to the chat, run through the exact same tile/embed/classify/vector-search pipeline as the standalone Shop the Room feature.</td></tr>
+          <tr><td>match_shopping_list</td><td>Gemini reads a photographed list/note/receipt itself (there's no OCR pipeline elsewhere in this app to reuse) and extracts items; each one is resolved to a real SKU via <code>_hybrid_search</code>.</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <div class="doc-callout">
+      <h3>Deterministic math, not LLM math</h3>
+      <p>The same principle the frontend already applies to price-intent parsing (Gemini extracts
+         intent, plain code does the arithmetic): <code>plan_office_setup</code> and
+         <code>plan_room_setup</code> filter by affordability <em>first</em>, then rank the
+         affordable survivors by a review-count-shrunk quality score, then spend any leftover
+         budget upgrading the weakest pick — all in plain Python against real catalog prices. An
+         earlier version ranked the 20 <em>cheapest</em> items by quality before checking
+         affordability, which meant a bigger budget could never unlock better furniture — a $10,000
+         and a $900 budget for the same headcount picked identical desks. Gemini decides
+         <em>when</em> to call the tool; it never computes a price.</p>
+    </div>
+    <div class="doc-callout">
+      <h3>One photo, two different divisions of labor</h3>
+      <p>Attaching a photo to the chat routes to one of two tools, and each deliberately assigns the
+         "seeing" differently. For <code>shop_the_room</code>, Gemini's vision narrates what it
+         sees but the real embedding pipeline finds the matches — same reasoning as every other
+         search in this app, vision never substitutes for a vector search against the actual
+         catalog. For <code>match_shopping_list</code>, it's the opposite split: reading messy
+         real-world handwriting or a receipt is exactly what an LLM is good at and there's no
+         deterministic OCR step to reuse, so Gemini reads it and extracts <code>{query, quantity}</code>
+         pairs itself — but resolving each one to a real SKU is handed back to the same
+         deterministic search everything else uses. A model can decide something IS an image; the
+         actual bytes never round-trip through a function-call argument, and the real matching
+         logic never trusts the model's own guess at what a product is.</p>
+    </div>
+    <p class="arch-lead">Two smaller but load-bearing decisions: the chat resends whatever product
+       cards are currently on screen as short context on every turn, so a follow-up like "the
+       cheaper one" or "just the chair" resolves against what was actually shown instead of nothing
+       (the model is deliberately told never to state a price/sku itself, so without this it never
+       otherwise learns what it displayed). And the turn a photo is attached forces Gemini into one
+       of the two image tools via Vertex's function-calling <code>ANY</code> mode, rather than
+       leaving it free to just describe the picture in prose — "attach a photo and nothing happens"
+       was a real failure mode until that was locked down. If Vertex/Gemini errors or isn't
+       configured, the endpoint falls back to the plain hybrid search and says so honestly
+       (<code>degraded: true</code>) rather than pretending the assistant produced the results.</p>
+  </section>
+
   <!-- ============ RECAP ============ -->
   <section class="arch-section">
     <h2>One line per stage</h2>
@@ -386,6 +445,7 @@
           <tr><td>Hybrid text search</td><td>Keyword LIKE-match and CLIP-text-vs-fused-vector semantic ranking, combined via Reciprocal Rank Fusion — no shared score to blend, so ranks fuse instead of numbers.</td></tr>
           <tr><td>Complete the Look</td><td>One stored vector → best match per OTHER category (not the source item's own), reusing Shop the Room's per-category search with no match-threshold gate.</td></tr>
           <tr><td>QR + mobile capture</td><td>Client-side QR code → phone camera → same startVisualSearch upload flow as desktop, downscaled first so the cross-page handoff can't exceed sessionStorage's quota.</td></tr>
+          <tr><td>Staples AI</td><td>In-process Gemini tool-calling over six tools, all backed by this same catalog/search/CV machinery — the model orchestrates, plain Python computes.</td></tr>
         </tbody>
       </table>
     </div>
