@@ -448,7 +448,7 @@ def _rrf_fuse(named_rankings, k=60, limit=HYBRID_SEARCH_POOL):
     return [(sku, scores[sku], sources[sku]) for sku in ranked]
 
 
-def _hybrid_search(q, limit=config.PAGE_SIZE, offset=0):
+def _hybrid_search(q, limit=config.PAGE_SIZE, offset=0, max_price=None):
     """Hybrid keyword + semantic search — the actual logic behind /api/search,
     factored out so backend/agent.py's search_products tool can call it
     in-process (no HTTP hop to itself) instead of duplicating it.
@@ -463,7 +463,14 @@ def _hybrid_search(q, limit=config.PAGE_SIZE, offset=0):
     RRF gets both without trying to compare their scores directly (not
     meaningful — see _rrf_fuse). Falls back to keyword-only, still with the
     relevance-order fix, when the active embedding backend has no text
-    tower."""
+    tower.
+
+    max_price: applied BEFORE pagination, not after -- filtering a single
+    already-fetched page client-side (the frontend's price-intent parser,
+    _parsePriceIntent, already existed for visual-search refinement, but
+    plain text search had nothing wired to it: "desks under $200" ignored
+    the budget entirely) would silently shrink individual pages and desync
+    `count`/offset from what's actually shown."""
     q = (q or "").strip()
     limit = max(1, min(int(limit), _MAX_PAGE_SIZE)) if limit is not None else _MAX_PAGE_SIZE
     offset = max(int(offset), 0)
@@ -485,9 +492,17 @@ def _hybrid_search(q, limit=config.PAGE_SIZE, offset=0):
     # whole catalog, so `count` here is that fused pool's size, not a true
     # total match count — same "bounded, not silently unbounded" tradeoff
     # REFINE_POOL_SIZE already makes elsewhere in this app.
+    pool_by_sku = None
+    if max_price is not None:
+        # Fetch the whole (bounded) fused pool once to filter by price
+        # before windowing -- reused below instead of a second lookup.
+        pool_by_sku = get_products_by_skus([sku for sku, _score, _sources in fused])
+        fused = [(sku, score, sources) for sku, score, sources in fused
+                 if pool_by_sku.get(sku) and pool_by_sku[sku]["price"] <= max_price]
+
     total = len(fused)
     window = fused[offset:offset + limit]
-    by_sku = get_products_by_skus([sku for sku, _score, _sources in window])
+    by_sku = pool_by_sku if pool_by_sku is not None else get_products_by_skus([sku for sku, _score, _sources in window])
     items = []
     for sku, _score, sources in window:
         p = by_sku.get(sku)
@@ -500,9 +515,9 @@ def _hybrid_search(q, limit=config.PAGE_SIZE, offset=0):
 
 
 @app.get("/api/search")
-def text_search(q: str = "", limit: int | None = config.PAGE_SIZE, offset: int = 0):
+def text_search(q: str = "", limit: int | None = config.PAGE_SIZE, offset: int = 0, max_price: float | None = None):
     """See _hybrid_search for the actual logic."""
-    return _hybrid_search(q, limit, offset)
+    return _hybrid_search(q, limit, offset, max_price)
 
 
 @app.get("/api/config")

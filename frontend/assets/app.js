@@ -498,8 +498,21 @@ async function renderListingPage({ category, query } = {}) {
   const countEl = document.getElementById("listing-count");
 
   if (query) {
-    title.textContent = `Results for “${query}”`;
-    _listing = { base: `${API_BASE}/api/search?q=${encodeURIComponent(query)}`, offset: 0, total: null, query };
+    // _parsePriceIntent already existed for the visual-search refine box
+    // ("cheaper", "under $50") but plain text search had nothing wired to
+    // it -- "desks under $200" searched for the literal phrase and ignored
+    // the budget entirely. residualText falls back to the original query
+    // when a price phrase was the WHOLE input (e.g. just "under $200"),
+    // since /api/search needs some term to search against; max_price still
+    // applies either way.
+    const { sort, maxPrice, residualText } = _parsePriceIntent(query);
+    const searchQ = residualText || query;
+    title.textContent = maxPrice != null
+      ? `Results for “${searchQ}” — under $${maxPrice.toFixed(0)}`
+      : `Results for “${query}”`;
+    let base = `${API_BASE}/api/search?q=${encodeURIComponent(searchQ)}`;
+    if (maxPrice != null) base += `&max_price=${encodeURIComponent(maxPrice)}`;
+    _listing = { base, offset: 0, total: null, query, sort };
   } else {
     title.textContent = category ? category.replace(/_/g, " ") : "All Products";
     const b = category ? `${API_BASE}/api/products?category=${encodeURIComponent(category)}` : `${API_BASE}/api/products?`;
@@ -520,7 +533,14 @@ async function renderListingPage({ category, query } = {}) {
         grid.innerHTML = `<div class="state-msg">No products matched${_listing.query ? ` “${esc(_listing.query)}”` : ""}. Try a different search or browse a category.</div>`;
         return;
       }
-      const html = data.items.map(p => productCardHTML(p)).join("");
+      // A bare "cheapest"/"most expensive" (no explicit $ amount, so no
+      // server-side max_price) is a per-page display sort, same as the
+      // visual-search sort dropdown -- doesn't change which items match,
+      // just their order within each loaded page.
+      let pageItems = data.items;
+      if (_listing.sort === "price-asc") pageItems = [...pageItems].sort((a, b) => a.price - b.price);
+      else if (_listing.sort === "price-desc") pageItems = [...pageItems].sort((a, b) => b.price - a.price);
+      const html = pageItems.map(p => productCardHTML(p)).join("");
       if (reset) grid.innerHTML = html; else grid.insertAdjacentHTML("beforeend", html);
       wireProductCardInteractions(grid);   // guarded — only wires new cards
       _listing.offset += data.items.length;
