@@ -428,7 +428,11 @@
        leaving it free to just describe the picture in prose — "attach a photo and nothing happens"
        was a real failure mode until that was locked down. If Vertex/Gemini errors or isn't
        configured, the endpoint falls back to the plain hybrid search and says so honestly
-       (<code>degraded: true</code>) rather than pretending the assistant produced the results.</p>
+       (<code>degraded: true</code>) rather than pretending the assistant produced the results.
+       Client-side, the conversation is persisted to <code>sessionStorage</code> as a full
+       replayable transcript (not just text) — reopening the chat on a different page of this
+       multi-page site restores the same messages, product cards, and a working "Add all to
+       cart" button, rather than resetting every navigation.</p>
   </section>
 
   <!-- ============ RECAP ============ -->
