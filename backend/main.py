@@ -1194,6 +1194,11 @@ def _do_agent_chat(message, history, last_items=None, image_bytes=None, image_mi
                 bundle = None
                 tool_result = {"acknowledged": True}
                 new_items = []
+            elif name == "swap_bundle_item":
+                result = agent.swap_bundle_item(args.get("sku", ""), args.get("direction", ""))
+                tool_result = agent.trim_swap_for_model(result)
+                bundle = None
+                new_items = [result["new_item"]] if result.get("feasible") else []
             else:
                 tool_result = {"error": f"unknown tool {name}"}
                 new_items = []

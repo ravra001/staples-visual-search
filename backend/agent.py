@@ -54,6 +54,15 @@ LLM-callable tools.
                            vector-searched, returning confidently wrong
                            furniture instead of declining. This tool lets
                            the model opt out honestly instead.
+  swap_bundle_item        — "make the desk cheaper" / "a nicer chair" for
+                           any item already known from this conversation
+                           (identified by sku, resolved via the existing
+                           screen-context mechanism -- no separate bundle-
+                           tracking state needed). Finds a genuinely better
+                           cheaper/nicer alternative in the SAME category,
+                           same deterministic-math philosophy as the
+                           bundling tools. Works on any item shown, not
+                           just ones from a bundle.
 
 Cart-adding is NOT a tool the model calls directly. A single searched
 product already has a working Add-to-cart button on its product card (see
@@ -66,7 +75,7 @@ response shape, not something the model decides to call.
 import re
 
 import config
-from products_data import get_products_by_category
+from products_data import get_product_by_sku, get_products_by_category
 
 _agent_state = {}
 
@@ -95,7 +104,7 @@ def _get_agent_model():
     tool = Tool(function_declarations=[
         _search_products_decl(), _plan_office_setup_decl(), _plan_room_setup_decl(),
         _shop_the_room_decl(), _match_shopping_list_decl(), _complete_the_look_decl(),
-        _not_shoppable_decl(),
+        _not_shoppable_decl(), _swap_bundle_item_decl(),
     ])
     model = GenerativeModel(
         config.AGENT_MODEL,
@@ -127,8 +136,12 @@ def _get_agent_model():
             "product cards already shown to the user have that; just refer to items by name. "
             "Some user messages will start with a bracketed [Context: ...] block listing what's "
             "currently shown on screen -- use it silently to resolve references like 'the second one' "
-            "or 'cheaper than that' (e.g. by calling search_products with a refined query), but never "
-            "quote or describe that block back to the user; it isn't something they wrote."
+            "(e.g. by calling search_products with a refined query), but never quote or describe that "
+            "block back to the user; it isn't something they wrote. When the user pushes back on ONE "
+            "specific item already shown -- 'make the desk cheaper', 'a nicer chair', 'that but "
+            "better' -- use swap_bundle_item with its sku from context and direction 'cheaper' or "
+            "'nicer', instead of a fresh search_products call; it finds a real alternative in the same "
+            "category rather than a possibly-unrelated new search result."
         ),
     )
     _agent_state.update(model=model, Tool=Tool)
@@ -268,6 +281,26 @@ def _not_shoppable_decl():
     )
 
 
+def _swap_bundle_item_decl():
+    from vertexai.generative_models import FunctionDeclaration
+    return FunctionDeclaration(
+        name="swap_bundle_item",
+        description=(
+            "Find a genuinely cheaper or nicer alternative to one specific product already known from "
+            "this conversation (from context or a prior result), in the SAME category. Use when the "
+            "user pushes back on one item -- 'make the desk cheaper', 'a nicer chair'."
+        ),
+        parameters={
+            "type": "object",
+            "properties": {
+                "sku": {"type": "string", "description": "The SKU of the item to find an alternative to"},
+                "direction": {"type": "string", "enum": ["cheaper", "nicer"], "description": "Whether to find a cheaper or a higher-quality alternative"},
+            },
+            "required": ["sku", "direction"],
+        },
+    )
+
+
 def trim_items_for_model(items, cap=8):
     """Full _serialize()'d product dicts include description, image_url,
     list_price, savings_pct -- thousands of wasted tokens per turn feeding
@@ -314,6 +347,18 @@ def trim_room_bundle_for_model(bundle):
     out = {k: v for k, v in bundle.items() if k != "items"}
     if bundle.get("items"):
         out["items"] = trim_items_for_model(bundle["items"], cap=12)
+    return out
+
+
+def trim_swap_for_model(result):
+    """Same reasoning again, for swap_bundle_item's old_item/new_item pair."""
+    if not result:
+        return result
+    out = {k: v for k, v in result.items() if k not in ("old_item", "new_item")}
+    for key in ("old_item", "new_item"):
+        item = result.get(key)
+        if item:
+            out[key] = trim_items_for_model([item], cap=1)[0]
     return out
 
 
@@ -540,4 +585,65 @@ def plan_room_setup(room_type, budget, style=""):
         "room_type": room_type, "style": style, "budget": round(budget, 2),
         "items": list(picks.values()),
         "total": round(total, 2), "under_by": round(budget - total, 2),
+    }
+
+
+def _normalize_direction(direction):
+    """Gemini should emit exactly "cheaper"/"nicer" (an enum'd parameter),
+    but a defensive normalize is cheap insurance against a near-miss like
+    "less expensive" or "better quality"."""
+    d = (direction or "").strip().lower()
+    if any(w in d for w in ("cheap", "budget", "less", "lower", "afford")):
+        return "cheaper"
+    return "nicer"
+
+
+def swap_bundle_item(sku, direction):
+    """"Make the desk cheaper" / "a nicer chair" -- for any item already
+    known from this conversation, not just ones from a bundle. Deliberately
+    stateless: no bundle/session needs to be tracked server-side, since the
+    sku alone (already in the model's context via the screen-awareness
+    mechanism) is enough to look up the item's real category and price and
+    search that category directly. "cheaper" means the best-quality option
+    still priced below the current item, not just the literal cheapest --
+    same "spend wisely, don't just minimize" philosophy as the bundling
+    tools. "nicer" prefers a same-or-higher-priced genuine upgrade over a
+    bare quality_score comparison -- an earlier version picked whatever had
+    the highest quality_score among ALL better-scoring candidates, which
+    for a $375 desk meant recommending a $20 desk as "nicer" purely because
+    it had thousands more reviews at the same star rating. Only falls back
+    to a cheaper-but-better item when nothing pricier is actually better.
+    """
+    direction = _normalize_direction(direction)
+    current = get_product_by_sku((sku or "").strip())
+    if not current:
+        return {"feasible": False, "reason": "That item isn't from this conversation -- search for it first."}
+
+    category = current["category"]
+    candidates = [p for p in get_products_by_category(category) if p["sku"] != current["sku"]]
+    if not candidates:
+        return {"feasible": False, "reason": f"No other {category} products available to compare.", "old_item": current}
+
+    if direction == "cheaper":
+        pool = [p for p in candidates if p["price"] < current["price"]]
+        if not pool:
+            return {"feasible": False, "reason": "This is already the cheapest option in its category.",
+                    "old_item": current, "category": category}
+        new_item = max(pool, key=_quality_score)
+    else:
+        current_score = _quality_score(current)
+        better = [p for p in candidates if _quality_score(p) > current_score]
+        if not better:
+            return {"feasible": False, "reason": "This is already one of the best-rated options in its category.",
+                    "old_item": current, "category": category}
+        upgrades = [p for p in better if p["price"] >= current["price"]]
+        # Cheapest genuine upgrade (same-or-higher price, better quality) if
+        # one exists; otherwise the single best-quality item overall is the
+        # honest answer even though it happens to cost less.
+        new_item = min(upgrades, key=lambda p: p["price"]) if upgrades else max(better, key=_quality_score)
+
+    return {
+        "feasible": True, "category": category, "direction": direction,
+        "old_item": current, "new_item": new_item,
+        "price_delta": round(new_item["price"] - current["price"], 2),
     }
