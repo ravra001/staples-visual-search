@@ -1032,7 +1032,12 @@ async def agent_chat(body: AgentChatRequest):
 
     try:
         return await run_in_threadpool(_do_agent_chat, message, body.history)
-    except Exception:
+    except Exception as e:
+        # Swallowed on purpose (falls back to plain search below) but must be
+        # logged -- an unlogged except here means Vertex/Gemini could be
+        # broken indefinitely with the demo silently degraded and no signal
+        # in Cloud Logging to say why.
+        print(f"[agent] _do_agent_chat failed, falling back to hybrid search: {type(e).__name__}: {e}")
         result = _hybrid_search(message, limit=8)
         reply = (f"Here's what I found for \"{message}\"." if result["count"]
                  else f"I couldn't find anything for \"{message}\" — try different words.")
