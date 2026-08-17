@@ -785,6 +785,17 @@ SHOP_ROOM_GRID = 2          # NxN tile sweep of the uploaded photo — kept smal
                             # single-search timing (~0.4-1.2s) -- 2x2 keeps
                             # worst-case latency bounded without a redesign.
 SHOP_ROOM_MAX_ITEMS = 6     # cap on distinct categories returned
+# A dedicated, slightly lower match-score gate for Shop the Room specifically
+# -- verified live on the app's own homepage sample photo (room-1.jpg): the
+# whole-image tile correctly classified a large grey sofa as "sofas" (this
+# feature already doesn't gate on classifier confidence, see the docstring
+# below), but its best catalog match scored 52.1%, just under the global
+# MATCH_THRESHOLD (55.0) calibrated for single-object searches. A tile crop
+# from a real lifestyle photo is inherently a weaker, more indirect query
+# than a clean single-object photo, so a small carve-out here is consistent
+# with the confidence carve-out this feature already has -- NOT a change to
+# the global threshold every other search in the app is calibrated against.
+SHOP_ROOM_MATCH_THRESHOLD = 50.0
 
 
 def _tile_crops(image_bytes, grid=SHOP_ROOM_GRID):
@@ -825,13 +836,14 @@ def _do_shop_the_room(image_bytes):
     36% confidence, well under the 45% auto-scope gate, but its top-1
     category guess was still right and the resulting product match scored
     77%). What actually matters here is whether the tile's TOP PRODUCT MATCH
-    clears MATCH_THRESHOLD — the same "is this actually a good match" gate
-    every other search in this app already uses, and a much more direct
-    signal than classifier confidence for "is this tile a real product."
-    Tiles whose top match doesn't clear it (a blank wall, empty floor,
-    nothing catalog-like) are simply skipped. Multiple tiles landing on the
-    same category (e.g. two tiles both seeing the same sofa) keep only the
-    best-scoring one.
+    clears SHOP_ROOM_MATCH_THRESHOLD — the same kind of "is this actually a
+    good match" gate every other search in this app uses, but a dedicated,
+    slightly lower one (see its definition above) rather than the global
+    MATCH_THRESHOLD, since a tile crop is a structurally weaker query than a
+    clean single-object photo. Tiles whose top match doesn't clear it (a
+    blank wall, empty floor, nothing catalog-like) are simply skipped.
+    Multiple tiles landing on the same category (e.g. two tiles both seeing
+    the same sofa) keep only the best-scoring one.
     """
     best_by_category = {}   # category -> (score, sku)
     for tile_bytes in _tile_crops(image_bytes):
@@ -845,7 +857,7 @@ def _do_shop_the_room(image_bytes):
         if not matches:
             continue
         sku, score = matches[0]
-        if score * 100 < config.MATCH_THRESHOLD:
+        if score * 100 < SHOP_ROOM_MATCH_THRESHOLD:
             continue
         prev = best_by_category.get(category)
         if prev is None or score > prev[0]:
