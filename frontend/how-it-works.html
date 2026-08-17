@@ -387,7 +387,7 @@
           <tr><td>plan_room_setup</td><td>The general case plan_office_setup deliberately isn't: one item per relevant category for a whole room (living room, bedroom, dining room…), with an optional style/color filter.</td></tr>
           <tr><td>complete_the_look</td><td>A thin wrapper over the existing per-category cross-sell pipeline described above.</td></tr>
           <tr><td>shop_the_room</td><td>A photo attached to the chat, run through the exact same tile/embed/classify/vector-search pipeline as the standalone Shop the Room feature.</td></tr>
-          <tr><td>match_shopping_list</td><td>Gemini reads a photographed list/note/receipt itself (there's no OCR pipeline elsewhere in this app to reuse) and extracts items; each one is resolved to a real SKU via <code>_hybrid_search</code>.</td></tr>
+          <tr><td>match_shopping_list</td><td>Multiple distinct items in one call, typed directly or read off a photographed list/note/receipt (no OCR pipeline elsewhere in this app to reuse, so Gemini reads the photo itself); each item is resolved to a real SKU via <code>_hybrid_search</code>.</td></tr>
           <tr><td>not_shoppable</td><td>The escape hatch when an attached photo is neither a room nor a list — an irrelevant photo used to get forced into shop_the_room and return confidently wrong furniture; now it can decline honestly.</td></tr>
           <tr><td>swap_bundle_item</td><td>"Make the desk cheaper" / "a nicer chair" for any item already known from the conversation (by sku) — finds a genuine same-category alternative, stateless, no bundle tracking needed server-side.</td></tr>
         </tbody>
