@@ -1419,6 +1419,20 @@ let _agentHistory = []; // [{role: "user"|"model", text}] -- kept in memory only
 // has nothing to resolve against, since the model is told not to state
 // prices/skus itself and so never actually learns what it showed.
 let _agentLastItems = [];
+
+// Upsert this turn's items into the rolling context window by sku, instead
+// of replacing it wholesale. A straight replace meant swap_bundle_item's
+// single-item response (just the new desk, say) wiped every OTHER item
+// from the prior bundle out of context -- a follow-up like "and a cheaper
+// chair too" had no chair sku left to resolve against. Older untouched
+// items stay available; anything re-touched this turn moves to the most-
+// recent end. Capped to match the backend's own last_items limit.
+function _mergeAgentContext(oldItems, newItems) {
+  const map = new Map(oldItems.map(it => [it.sku, it]));
+  for (const it of newItems) map.set(it.sku, it);
+  return [...map.values()].slice(-12);
+}
+
 // Photo attached to the NEXT message only -- {b64, mime, dataUrl} or null.
 // Cleared after sending; not carried into history (see _do_agent_chat on
 // the backend, which likewise only attaches an image to the current turn).
@@ -1539,11 +1553,11 @@ async function sendAgentMessage(text, image = null) {
     // what was said about the photo, just not the photo itself again.
     _agentHistory.push({ role: "user", text: text || "[attached a photo]" });
     _agentHistory.push({ role: "model", text: data.reply || "" });
-    // Only what's about to render below counts as "on screen" for the next
-    // follow-up -- replaced each turn, not accumulated across turns.
-    _agentLastItems = (data.items || []).map(p => (
+    // Merge this turn's items into the rolling context rather than
+    // replacing it -- see _mergeAgentContext.
+    _agentLastItems = _mergeAgentContext(_agentLastItems, (data.items || []).map(p => (
       { sku: p.sku, name: p.name, price: p.price, category: p.category }
-    ));
+    )));
 
     let html = `<p>${esc(data.reply || "")}</p>`;
     if (data.degraded) {

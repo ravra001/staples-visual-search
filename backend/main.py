@@ -341,6 +341,20 @@ def _serialize(p):
     }
 
 
+def _serialize_bundle_items(container, *keys):
+    """In-place: replace container[key] with _serialize(container[key]) for
+    each key present. agent.py's bundling tools (plan_office_setup,
+    plan_room_setup, swap_bundle_item) return raw catalog rows via
+    get_products_by_category/get_product_by_sku, not the _serialize()'d
+    ones every other tool's card data goes through (_hybrid_search already
+    serializes internally) -- skipping this left every bundle/swap card
+    showing "You save undefined%" and its image bypassing the CDN redirect."""
+    for key in keys:
+        item = container.get(key)
+        if item:
+            container[key] = _serialize(item)
+
+
 # ---------- API ----------
 
 _MAX_PAGE_SIZE = 200
@@ -1017,6 +1031,20 @@ def _build_screen_context(last_items):
 _STOPWORDS = {"the", "and", "for", "with", "some", "any", "get", "buy", "need", "please"}
 
 
+def _singularize(word):
+    """Cheap plural stripping, not a real stemmer -- "staplers" -> "stapler",
+    "lamps" -> "lamp", "boxes" -> "box". Doesn't need to be linguistically
+    complete, just needs to stop a plural query word from failing a
+    singular product name's substring check."""
+    if word.endswith("ies") and len(word) > 4:
+        return word[:-3] + "y"
+    if word.endswith(("ses", "xes", "ches", "shes")) and len(word) > 4:
+        return word[:-2]
+    if word.endswith("s") and not word.endswith("ss") and len(word) > 3:
+        return word[:-1]
+    return word
+
+
 def _plausible_match(query, item):
     """_hybrid_search's RRF fusion has no natural reject threshold -- it
     returns SOMETHING for almost any string, since the semantic side always
@@ -1024,16 +1052,19 @@ def _plausible_match(query, item):
     relevant. Taking its top-1 unfiltered meant match_shopping_list could
     confidently resolve a scribbled "milk" to an office chair, and the
     unmatched list -- meant to be an honest signal -- would almost never
-    populate. Require at least one real query word to actually appear in
-    the matched product's own name/category text, mirroring the substring
-    logic the keyword side of search already uses. Imperfect (misses pure
-    synonyms like "sofa" matching a product only ever named "couch"), but a
-    real floor where there was none."""
+    populate. Require at least one real query word (or its singular form)
+    to actually appear in the matched product's own name/category text,
+    mirroring the substring logic the keyword side of search already uses.
+    The singular check matters in practice: "5 staplers" -> word "staplers"
+    -> real match is "Swingline Stapler" (singular) -> a bare substring
+    check fails and falsely reports it as unmatched. Imperfect (misses
+    pure synonyms like "sofa" matching a product only ever named "couch"),
+    but a real floor where there was none."""
     words = [w for w in re.split(r"\W+", query.lower()) if len(w) > 2 and w not in _STOPWORDS]
     if not words:
         return True
     haystack = f"{item.get('name', '')} {item.get('category', '')}".lower()
-    return any(w in haystack for w in words)
+    return any(w in haystack or _singularize(w) in haystack for w in words)
 
 
 def _do_agent_chat(message, history, last_items=None, image_bytes=None, image_mime=None):
@@ -1112,18 +1143,37 @@ def _do_agent_chat(message, history, last_items=None, image_bytes=None, image_mi
         for fc in fn_calls:
             name = fc.name
             args = dict(fc.args)
+            # bundle is intentionally NOT reset here -- only the three
+            # actual bundle-producing branches below (plan_office_setup,
+            # plan_room_setup, match_shopping_list) assign to it. Every
+            # other tool used to explicitly null it, which meant a bundle
+            # from an EARLIER call in the same turn (or an earlier
+            # iteration of this loop) silently lost its "Add all to cart"
+            # button the moment any other tool -- even an unrelated
+            # search_products, or an error path that never should have
+            # touched bundle status at all -- ran afterward.
             if name == "search_products":
                 result = _hybrid_search(args.get("query", ""), limit=8)
-                bundle = None
                 tool_result = {"count": result["count"], "items": agent.trim_items_for_model(result["items"])}
                 new_items = result["items"]
             elif name == "plan_office_setup":
                 bundle = agent.plan_office_setup(args.get("people_count"), args.get("budget"))
+                # get_products_by_category/get_product_by_sku (agent.py)
+                # return raw catalog rows, not _serialize()'d ones -- unlike
+                # search_products/match_shopping_list (which route through
+                # _hybrid_search, already serialized) or complete_the_look/
+                # shop_the_room (serialized explicitly below). Skipping this
+                # meant every bundle card showed "You save undefined%" and
+                # its image bypassed the CDN redirect.
+                _serialize_bundle_items(bundle, "desk", "chair", "shared_item", "closest_desk", "closest_chair")
                 tool_result = agent.trim_bundle_for_model(bundle)
                 new_items = [v for k in ("desk", "chair", "shared_item", "closest_desk", "closest_chair")
                              if (v := bundle.get(k))]
             elif name == "plan_room_setup":
                 bundle = agent.plan_room_setup(args.get("room_type", ""), args.get("budget"), args.get("style", ""))
+                if bundle.get("items"):
+                    bundle["items"] = [_serialize(p) for p in bundle["items"]]
+                _serialize_bundle_items(bundle, "closest_item")
                 tool_result = agent.trim_room_bundle_for_model(bundle)
                 new_items = list(bundle.get("items") or [])
                 if bundle.get("closest_item"):
@@ -1143,7 +1193,6 @@ def _do_agent_chat(message, history, last_items=None, image_bytes=None, image_mi
                             item = _serialize(p)
                             item["match_score"] = round(score * 100, 1)
                             result_items.append(item)
-                    bundle = None
                     tool_result = {"count": len(result_items), "items": agent.trim_items_for_model(result_items)}
                     new_items = result_items
             elif name == "shop_the_room":
@@ -1165,7 +1214,6 @@ def _do_agent_chat(message, history, last_items=None, image_bytes=None, image_mi
                             item = _serialize(p)
                             item["match_score"] = round(score * 100, 1)
                             result_items.append(item)
-                    bundle = None
                     tool_result = {"count": len(result_items), "items": agent.trim_items_for_model(result_items, cap=6)}
                     new_items = result_items
             elif name == "match_shopping_list":
@@ -1191,23 +1239,30 @@ def _do_agent_chat(message, history, last_items=None, image_bytes=None, image_mi
                 tool_result = agent.trim_room_bundle_for_model(bundle)
                 new_items = matched
             elif name == "not_shoppable":
-                bundle = None
                 tool_result = {"acknowledged": True}
                 new_items = []
             elif name == "swap_bundle_item":
                 result = agent.swap_bundle_item(args.get("sku", ""), args.get("direction", ""))
+                _serialize_bundle_items(result, "old_item", "new_item")
                 tool_result = agent.trim_swap_for_model(result)
-                bundle = None
                 new_items = [result["new_item"]] if result.get("feasible") else []
             else:
                 tool_result = {"error": f"unknown tool {name}"}
                 new_items = []
-            # Accumulate + dedupe by sku rather than overwrite -- a single
-            # turn can chain multiple search calls ("I need a desk and a
-            # lamp"), and overwriting silently dropped the earlier results'
-            # cards even though the reply text still referenced them.
+            # Accumulate + dedupe by sku rather than drop the duplicate --
+            # a single turn can chain multiple search calls ("I need a desk
+            # and a lamp"), and dropping silently kept whichever copy
+            # happened to be seen FIRST even when a later call's copy was
+            # more specific (e.g. match_shopping_list's requested_qty)
+            # -- update in place instead, keeping the original card
+            # position but the freshest data.
             for item in new_items:
-                if item["sku"] not in seen_skus:
+                if item["sku"] in seen_skus:
+                    for idx, existing in enumerate(items):
+                        if existing["sku"] == item["sku"]:
+                            items[idx] = item
+                            break
+                else:
                     seen_skus.add(item["sku"])
                     items.append(item)
             response_parts.append(Part.from_function_response(name=name, response=tool_result))

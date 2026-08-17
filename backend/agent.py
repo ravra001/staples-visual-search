@@ -388,15 +388,19 @@ def _quality_score(p):
 
 
 def _best_affordable(categories, budget):
-    """Spend AS MUCH of the given budget as fits, not the least. Tries each
-    category in order and returns the priciest affordable item from the
-    first category that has one at all -- e.g. prefer a good storage unit
-    over a cheap lighting fixture, but don't reach for lighting only because
-    it iterated there first."""
+    """Spend the given budget on genuine quality, not just the highest price
+    that fits. An earlier version picked by price alone, which could return
+    a 0-review $900 shelf as the "quality upgrade" purely because it was the
+    most expensive thing under budget -- contradicts the quality-first
+    philosophy every other pick in this module uses. Ranks by quality_score
+    first, price second (so among near-equal quality, still prefer using
+    more of the leftover budget rather than leaving it needlessly unspent).
+    Tries each category in order, returning the best affordable item from
+    the first category that has one at all."""
     for cat in categories:
         affordable = [p for p in get_products_by_category(cat, order_by_price=True) if p["price"] <= budget]
         if affordable:
-            return max(affordable, key=lambda p: p["price"])
+            return max(affordable, key=lambda p: (_quality_score(p), p["price"]))
     return None
 
 
