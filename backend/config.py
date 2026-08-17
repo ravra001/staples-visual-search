@@ -96,6 +96,14 @@ CORS_ORIGINS = [o.strip() for o in _cors_env.split(",") if o.strip()] if _cors_e
 # inference) from serving static image bytes. See GCP_SETUP.md.
 IMAGES_BASE_URL = (_val("IMAGES_BASE_URL", "images.base_url", "") or "").rstrip("/")
 
+# ---- Staples AI chat agent ----
+# Reuses GCP_PROJECT/GCP_LOCATION above (same Vertex AI project, whether or
+# not EMBEDDING_BACKEND=vertex is active) -- Gemini and the multimodal
+# embedding model are separate Vertex APIs, same project/credentials.
+AGENT_ENABLED = _bool_val("AGENT_ENABLED", "agent.enabled", True)
+AGENT_MODEL = _val("AGENT_MODEL", "agent.model", "gemini-2.0-flash-001")
+AGENT_MAX_ITERATIONS = int(_val("AGENT_MAX_ITERATIONS", "agent.max_iterations", 3))
+
 
 def index_fingerprint(catalog_hash=None):
     """Identity of the model (+ fusion config, + optionally the catalog content)

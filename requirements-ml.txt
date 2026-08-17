@@ -12,6 +12,10 @@ open_clip_torch>=2.24
 truststore>=0.9
 
 # --- EMBEDDING_BACKEND=vertex (Google Vertex AI Multimodal Embeddings) ---
+# Also the SDK for backend/agent.py's Gemini tool-calling (Staples AI chat) --
+# same package, vertexai.generative_models instead of vertexai.vision_models.
+# Installed unconditionally (see Dockerfile), so AGENT_ENABLED works
+# regardless of which EMBEDDING_BACKEND is active.
 google-cloud-aiplatform>=1.60
 
 # --- DATA_BACKEND=sql (Cloud SQL / Postgres, pgvector for vector search) ---

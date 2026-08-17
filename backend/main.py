@@ -14,10 +14,12 @@ from contextlib import asynccontextmanager
 
 import numpy as np
 import config
+import agent
 from fastapi import FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, RedirectResponse
+from pydantic import BaseModel
 from starlette.concurrency import run_in_threadpool
 
 from products_data import (
@@ -427,19 +429,22 @@ def _rrf_fuse(named_rankings, k=60, limit=HYBRID_SEARCH_POOL):
     return [(sku, scores[sku], sources[sku]) for sku in ranked]
 
 
-@app.get("/api/search")
-def text_search(q: str = "", limit: int | None = config.PAGE_SIZE, offset: int = 0):
-    """Hybrid keyword + semantic search. The existing LIKE-based keyword
-    match (ranked by name-hit relevance rather than arbitrary sku order —
-    see search_products_ranked_skus / _mem_search) is fused via Reciprocal
-    Rank Fusion with a CLIP-text-tower semantic ranking against the
-    catalog's fused vectors. Keyword alone misses anything phrased
-    differently than the catalog text ("something to print with" matches
-    nothing containing "print"); semantic alone can rank a literal
-    exact-name hit below something merely topically similar. RRF gets both
-    without trying to compare their scores directly (not meaningful — see
-    _rrf_fuse). Falls back to keyword-only, still with the relevance-order
-    fix, when the active embedding backend has no text tower."""
+def _hybrid_search(q, limit=config.PAGE_SIZE, offset=0):
+    """Hybrid keyword + semantic search — the actual logic behind /api/search,
+    factored out so backend/agent.py's search_products tool can call it
+    in-process (no HTTP hop to itself) instead of duplicating it.
+
+    The existing LIKE-based keyword match (ranked by name-hit relevance
+    rather than arbitrary sku order — see search_products_ranked_skus /
+    _mem_search) is fused via Reciprocal Rank Fusion with a CLIP-text-tower
+    semantic ranking against the catalog's fused vectors. Keyword alone
+    misses anything phrased differently than the catalog text ("something
+    to print with" matches nothing containing "print"); semantic alone can
+    rank a literal exact-name hit below something merely topically similar.
+    RRF gets both without trying to compare their scores directly (not
+    meaningful — see _rrf_fuse). Falls back to keyword-only, still with the
+    relevance-order fix, when the active embedding backend has no text
+    tower."""
     q = (q or "").strip()
     limit = max(1, min(int(limit), _MAX_PAGE_SIZE)) if limit is not None else _MAX_PAGE_SIZE
     offset = max(int(offset), 0)
@@ -473,6 +478,12 @@ def text_search(q: str = "", limit: int | None = config.PAGE_SIZE, offset: int =
             items.append(item)
 
     return {"count": total, "query": q, "offset": offset, "limit": limit, "items": items}
+
+
+@app.get("/api/search")
+def text_search(q: str = "", limit: int | None = config.PAGE_SIZE, offset: int = 0):
+    """See _hybrid_search for the actual logic."""
+    return _hybrid_search(q, limit, offset)
 
 
 @app.get("/api/config")
@@ -939,6 +950,93 @@ async def visual_search(request: Request, file: UploadFile = File(...),
         # backend is active; under memory it depends on whether image_vecs loaded.
         "score_basis": "image" if (DATA_BACKEND == "sql" or _index_image_matrix.size) else "fused",
     }
+
+
+# ---------- Staples AI chat agent ----------
+
+class AgentChatRequest(BaseModel):
+    message: str
+    history: list[dict] = []
+
+
+def _history_to_contents(history):
+    from vertexai.generative_models import Content, Part
+    contents = []
+    for turn in history:
+        role = "model" if turn.get("role") == "model" else "user"
+        text = str(turn.get("text", "")).strip()
+        if text:
+            contents.append(Content(role=role, parts=[Part.from_text(text)]))
+    return contents
+
+
+def _do_agent_chat(message, history):
+    """Tool-calling loop: ask Gemini, and when it calls a tool, run the
+    REAL implementation in-process (_hybrid_search for search_products,
+    agent.plan_office_setup for plan_office_setup) and feed the real
+    result back -- the model never invents product data or prices, it
+    only ever narrates what these two functions actually returned."""
+    from vertexai.generative_models import Content, Part
+
+    state = agent._get_agent_model()
+    model = state["model"]
+    contents = _history_to_contents(history) + [Content(role="user", parts=[Part.from_text(message)])]
+
+    items, bundle = [], None
+    for _ in range(config.AGENT_MAX_ITERATIONS):
+        resp = model.generate_content(contents)
+        candidate = resp.candidates[0]
+        parts = candidate.content.parts
+        fn_calls = [p.function_call for p in parts if p.function_call]
+
+        if not fn_calls:
+            reply = "".join(p.text for p in parts if p.text).strip()
+            return {"reply": reply or "I'm not sure how to help with that.", "items": items, "bundle": bundle}
+
+        contents.append(candidate.content)
+        response_parts = []
+        for fc in fn_calls:
+            name = fc.name
+            args = dict(fc.args)
+            if name == "search_products":
+                result = _hybrid_search(args.get("query", ""), limit=8)
+                items = result["items"]
+                bundle = None
+                tool_result = {"count": result["count"], "items": agent.trim_items_for_model(items)}
+            elif name == "plan_office_setup":
+                bundle = agent.plan_office_setup(args.get("people_count"), args.get("budget"))
+                items = [i for i in (bundle.get("desk"), bundle.get("chair"), bundle.get("shared_item"),
+                                      bundle.get("closest_desk"), bundle.get("closest_chair")) if i]
+                tool_result = bundle
+            else:
+                tool_result = {"error": f"unknown tool {name}"}
+            response_parts.append(Part.from_function_response(name=name, response=tool_result))
+        contents.append(Content(role="function", parts=response_parts))
+
+    return {
+        "reply": "I looked into a few options but couldn't narrow it down — try being more specific.",
+        "items": items, "bundle": bundle,
+    }
+
+
+@app.post("/api/agent/chat")
+async def agent_chat(body: AgentChatRequest):
+    """Staples AI. Falls back to a plain hybrid search on the user's raw
+    message if Vertex/Gemini errors or isn't configured (e.g. GCP_PROJECT
+    unset locally) -- a real degraded mode, not a scripted demo path."""
+    if not config.AGENT_ENABLED:
+        raise HTTPException(503, "Staples AI is disabled")
+    message = (body.message or "").strip()
+    if not message:
+        raise HTTPException(400, "message is required")
+
+    try:
+        return await run_in_threadpool(_do_agent_chat, message, body.history)
+    except Exception:
+        result = _hybrid_search(message, limit=8)
+        reply = (f"Here's what I found for \"{message}\"." if result["count"]
+                 else f"I couldn't find anything for \"{message}\" — try different words.")
+        return {"reply": reply, "items": result["items"], "bundle": None}
 
 
 # ---------- static assets ----------

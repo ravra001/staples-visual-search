@@ -582,6 +582,40 @@ against the pre-fix groupings.
 
 ---
 
+## 15. Staples AI chat agent (Vertex Gemini)
+
+The `/api/agent/chat` endpoint (`backend/agent.py`) is a small tool-calling
+chat agent — Gemini decides when to call `search_products` (delegates to
+the existing hybrid search) or `plan_office_setup` (deterministic Python
+arithmetic over real catalog prices; Gemini never computes the numbers
+itself). It runs in-process in the same Cloud Run service, not a separate
+deployment. Two things this needs that nothing else in this guide sets up:
+
+```bash
+# Vertex AI wasn't in the step-2 API list because nothing needed it while
+# EMBEDDING_BACKEND=clip was the only backend in production.
+gcloud services enable aiplatform.googleapis.com
+
+# Lets the Cloud Run service account actually call Gemini.
+gcloud projects add-iam-policy-binding "$PROJECT_ID" \
+  --member="serviceAccount:${SA_EMAIL}" \
+  --role="roles/aiplatform.user"
+```
+
+`GCP_PROJECT` is set automatically at deploy time from Cloud Build's own
+`$PROJECT_ID` substitution (see `cloudbuild.yaml`) — the real project ID is
+never committed to the repo, same pattern as the model bucket/CDN host in
+step 13. `AGENT_ENABLED=false` (env var or `config.yaml`'s `agent.enabled`)
+turns the feature off entirely if you'd rather not grant the IAM role.
+
+If Gemini errors or times out (including simply not being reachable, e.g.
+this repo's own dev machine — see the TLS-interception note below),
+`/api/agent/chat` falls back to a plain hybrid search on the user's raw
+message rather than failing the request — a real degraded mode, not a
+scripted demo path.
+
+---
+
 ## Troubleshooting
 
 Every one of these actually happened during this project's deployment.

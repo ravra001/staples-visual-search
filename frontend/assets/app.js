@@ -96,6 +96,7 @@ const ICONS = {
   user: `<svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="1.7"><circle cx="12" cy="8" r="3.5"/><path d="M4.5 20c1.5-4 4.5-6 7.5-6s6 2 7.5 6"/></svg>`,
   orders: `<svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M4 4h11l1 4H5"/><path d="M5 8v10a1 1 0 0 0 1 1h11a1 1 0 0 0 1-1V8"/><line x1="9" y1="12" x2="14" y2="12"/></svg>`,
   scan: `<svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M4 4h4M4 4v4M20 4h-4M20 4v4M4 20h4M4 20v-4M20 20h-4M20 20v-4"/><rect x="9" y="9" width="6" height="6" rx="1"/></svg>`,
+  chat: `<svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M4 5h16v11H8l-4 4V5z"/></svg>`,
   cart: `<svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M3 4h2l2.4 12.4a2 2 0 0 0 2 1.6h7.2a2 2 0 0 0 2-1.6L20 8H6"/><circle cx="9.5" cy="20.5" r="1.2"/><circle cx="17" cy="20.5" r="1.2"/></svg>`,
   chevron: `<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2"><polyline points="6 9 12 15 18 9"/></svg>`,
 };
@@ -165,6 +166,7 @@ function renderSiteHeader() {
         <div class="account-icons">
           <a class="acct-link" href="#" title="Sign In">${ICONS.user}<span>Sign In</span></a>
           <button class="acct-link" id="header-scan-btn" type="button" title="Scan to try">${ICONS.scan}<span>Scan to try</span></button>
+          <button class="acct-link" id="header-agent-btn" type="button" title="Staples AI">${ICONS.chat}<span>Staples AI</span></button>
           <a class="acct-link cart-btn" href="/cart.html" title="Cart" aria-label="Cart">
             ${ICONS.cart}<span>Cart</span>
             <span id="cart-count" class="cart-badge">${getCartCount()}</span>
@@ -189,6 +191,7 @@ function renderSiteHeader() {
 
 function wireHeaderInteractions() {
   document.getElementById("header-scan-btn")?.addEventListener("click", openScanModal);
+  document.getElementById("header-agent-btn")?.addEventListener("click", openAgentModal);
   // Rotating promo message
   const promo = document.getElementById("promo-text");
   if (promo && PROMO_MESSAGES.length > 1) {
@@ -1391,6 +1394,114 @@ function renderMobileScanLanding() {
     if (!file) return;
     startVisualSearch(file);
   });
+}
+
+// ---------- Staples AI chat ----------
+// A small chat modal that talks to POST /api/agent/chat (backend/agent.py).
+// The model can call two tools server-side: search_products (renders
+// product cards, same productCardHTML/wireProductCardInteractions as
+// everywhere else) and plan_office_setup (renders those cards plus one
+// "Add all to cart" action for the whole bundle). No client-side tool
+// execution and no single-SKU "add to cart" from chat -- every product
+// card already has its own Add button, so that would be redundant; see
+// how-it-works.html for why the bundle case is the one genuinely new
+// action worth adding here.
+let _agentModalBuilt = false;
+let _agentHistory = []; // [{role: "user"|"model", text}] -- kept in memory only, resets on page load
+
+function buildAgentModal() {
+  if (_agentModalBuilt) return;
+  _agentModalBuilt = true;
+  const modal = document.createElement("div");
+  modal.id = "vs-agent-modal";
+  modal.className = "vs-agent-modal";
+  modal.hidden = true;
+  modal.innerHTML = `
+    <div class="vs-agent-modal-inner">
+      <div class="vs-agent-header">
+        <h3>Staples AI</h3>
+        <button id="vs-agent-close" type="button" aria-label="Close">&times;</button>
+      </div>
+      <div class="vs-agent-messages" id="vs-agent-messages">
+        <div class="vs-agent-msg vs-agent-msg-model">
+          Hi! Ask me to find a product, or try something like
+          <em>"set up an office for 15 people under $5000"</em>.
+        </div>
+      </div>
+      <form id="vs-agent-form" class="vs-agent-form" autocomplete="off">
+        <input id="vs-agent-input" type="text" placeholder="Ask Staples AI…" />
+        <button type="submit">Send</button>
+      </form>
+    </div>`;
+  document.body.appendChild(modal);
+  modal.querySelector("#vs-agent-close").addEventListener("click", () => { modal.hidden = true; });
+  modal.addEventListener("click", (e) => { if (e.target === modal) modal.hidden = true; });
+  modal.querySelector("#vs-agent-form").addEventListener("submit", (e) => {
+    e.preventDefault();
+    const input = modal.querySelector("#vs-agent-input");
+    const text = input.value.trim();
+    if (!text) return;
+    input.value = "";
+    sendAgentMessage(text);
+  });
+}
+
+function openAgentModal() {
+  buildAgentModal();
+  document.getElementById("vs-agent-modal").hidden = false;
+  document.getElementById("vs-agent-input")?.focus();
+}
+
+function _appendAgentMessage(role, html) {
+  const list = document.getElementById("vs-agent-messages");
+  const div = document.createElement("div");
+  div.className = `vs-agent-msg vs-agent-msg-${role}`;
+  div.innerHTML = html;
+  list.appendChild(div);
+  list.scrollTop = list.scrollHeight;
+  return div;
+}
+
+async function sendAgentMessage(text) {
+  _appendAgentMessage("user", esc(text));
+  const pending = _appendAgentMessage("model", `<div class="spinner"></div>`);
+
+  try {
+    const res = await fetch(`${API_BASE}/api/agent/chat`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ message: text, history: _agentHistory }),
+    });
+    if (!res.ok) throw new Error("Staples AI is unavailable right now.");
+    const data = await res.json();
+
+    _agentHistory.push({ role: "user", text });
+    _agentHistory.push({ role: "model", text: data.reply || "" });
+
+    let html = `<p>${esc(data.reply || "")}</p>`;
+    if (data.items && data.items.length) {
+      html += `<div class="vs-agent-cards">${data.items.map(p => productCardHTML(p)).join("")}</div>`;
+    }
+    if (data.bundle && data.bundle.feasible) {
+      html += `<button class="vs-agent-add-bundle" type="button">Add all to cart — $${data.bundle.total.toFixed(2)}</button>`;
+    }
+    pending.innerHTML = html;
+    wireProductCardInteractions(pending);
+
+    const bundleBtn = pending.querySelector(".vs-agent-add-bundle");
+    if (bundleBtn) {
+      bundleBtn.addEventListener("click", () => {
+        const b = data.bundle;
+        addToCart(b.desk.sku, data.bundle.people_count);
+        addToCart(b.chair.sku, data.bundle.people_count);
+        if (b.shared_item) addToCart(b.shared_item.sku, 1);
+        bundleBtn.textContent = "Added ✓";
+        bundleBtn.disabled = true;
+      });
+    }
+  } catch (e) {
+    pending.innerHTML = `<p>${esc(e.message || "Something went wrong. Please try again.")}</p>`;
+  }
 }
 
 // ---------- Global image drop / paste-to-search ----------

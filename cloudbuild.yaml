@@ -45,7 +45,11 @@ steps:
   # set up in GCP_SETUP.md step 13 (verified ACTIVE + serving before this
   # was added). --set-env-vars replaces the full env var list, but doesn't
   # touch --set-secrets (DATABASE_URL is a secret, a separate namespace).
-  - '--set-env-vars=IMAGES_BASE_URL=${_IMAGES_BASE_URL}'
+  # GCP_PROJECT is for the Staples AI chat agent (backend/agent.py) to call
+  # Vertex Gemini -- uses Cloud Build's own built-in $PROJECT_ID substitution
+  # rather than a hardcoded/custom one, so the real project ID never has to
+  # be committed anywhere in this public repo.
+  - '--set-env-vars=IMAGES_BASE_URL=${_IMAGES_BASE_URL},GCP_PROJECT=$PROJECT_ID'
 
 images:
 - 'us-central1-docker.pkg.dev/$PROJECT_ID/staples-repo/staples-visual-search:$SHORT_SHA'

@@ -758,6 +758,52 @@ a { color: inherit; text-decoration: none; }
 .vs-mobile-scan-btn:active { background: var(--staples-red-dark); }
 .vs-mobile-scan-label { font-size: 13px; font-weight: 600; color: var(--staples-red); }
 
+/* Staples AI chat (see buildAgentModal/sendAgentMessage in app.js) */
+.vs-agent-modal {
+  position: fixed;
+  inset: 0;
+  background: rgba(0,0,0,0.6);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 10000;
+  padding: 20px;
+}
+.vs-agent-modal-inner {
+  background: #fff; border-radius: 12px; width: 100%; max-width: 460px;
+  height: min(640px, 85vh); display: flex; flex-direction: column; overflow: hidden;
+}
+.vs-agent-header {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 14px 18px; border-bottom: 1px solid var(--border);
+}
+.vs-agent-header h3 { margin: 0; font-size: 16px; }
+#vs-agent-close { background: none; border: none; font-size: 22px; line-height: 1; cursor: pointer; color: var(--gray-text); }
+#vs-agent-close:hover { color: var(--staples-red); }
+.vs-agent-messages { flex: 1; overflow-y: auto; padding: 16px 18px; display: flex; flex-direction: column; gap: 12px; }
+.vs-agent-msg { font-size: 13.5px; line-height: 1.5; max-width: 92%; }
+.vs-agent-msg p { margin: 0 0 8px; }
+.vs-agent-msg-user { align-self: flex-end; background: var(--staples-red); color: #fff; border-radius: 14px 14px 2px 14px; padding: 8px 12px; }
+.vs-agent-msg-model { align-self: flex-start; background: var(--bg-light, #f4f4f4); border-radius: 14px 14px 14px 2px; padding: 8px 12px; }
+.vs-agent-cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 10px; margin-top: 4px; }
+.vs-agent-cards .product-card { font-size: 12px; }
+.vs-agent-add-bundle {
+  margin-top: 8px; width: 100%; border-radius: 18px; padding: 9px 16px;
+  font-size: 13px; font-weight: 600; cursor: pointer; background: var(--staples-red); border: none; color: #fff;
+}
+.vs-agent-add-bundle:hover { background: var(--staples-red-dark); }
+.vs-agent-add-bundle:disabled { background: var(--border); color: var(--gray-text); cursor: not-allowed; }
+.vs-agent-form { display: flex; gap: 8px; padding: 12px 14px; border-top: 1px solid var(--border); }
+.vs-agent-form input {
+  flex: 1; border: 1px solid var(--border); border-radius: 18px; padding: 9px 14px; font-size: 13.5px;
+}
+.vs-agent-form input:focus { outline: none; border-color: var(--staples-red); }
+.vs-agent-form button {
+  border-radius: 18px; padding: 9px 18px; font-size: 13px; font-weight: 600; cursor: pointer;
+  background: var(--staples-red); border: none; color: #fff;
+}
+.vs-agent-form button:hover { background: var(--staples-red-dark); }
+
 /* Global drag-to-search overlay (see wireGlobalImageDrop in app.js) */
 body.vs-dragging::after {
   content: "Drop photo to search";
