@@ -318,17 +318,38 @@ def get_categories():
         return [r[0] for r in rows]
 
 
-def get_products_page(category=None, limit=24, offset=0):
+def get_products_page(category=None, limit=24, offset=0, sort=None):
     """Paginated product listing — LIMIT/OFFSET pushed down to Postgres, so
     listing a page of the catalog doesn't require fetching every row (with
     full description text) just to slice it in Python. Used by /api/products.
-    Returns (total_count, [product dict, ...])."""
+    Returns (total_count, [product dict, ...]).
+
+    sort: None (sku order, the default) | "deals" (biggest discount off
+    list_price first) | "popular" (review-count-shrunk rating first, same
+    formula agent.py's _quality_score uses for bundle picks — not a bare
+    rating, which would let a 5.0-with-3-reviews item beat a 4.6 with
+    3,000). Both computed and ORDER BY'd in SQL rather than fetched into
+    Python -- the homepage's "Deals just for you" and "Popular right now"
+    rails previously called the exact same unfiltered/unsorted query with
+    only a different LIMIT/OFFSET, so they showed two arbitrary slices of
+    the same list with no actual deal or popularity criteria at all."""
     with SessionLocal() as s:
         base = select(Product)
         if category is not None:
             base = base.where(Product.category == category)
         total = s.execute(select(func.count()).select_from(base.subquery())).scalar_one()
-        rows = s.execute(base.order_by(Product.sku).limit(limit).offset(offset)).scalars().all()
+        if sort == "deals":
+            discount = case(
+                (Product.list_price > 0, (Product.list_price - Product.price) / Product.list_price),
+                else_=0.0,
+            )
+            base = base.order_by(discount.desc(), Product.sku)
+        elif sort == "popular":
+            quality = Product.rating * Product.reviews / (Product.reviews + 20)
+            base = base.order_by(quality.desc(), Product.sku)
+        else:
+            base = base.order_by(Product.sku)
+        rows = s.execute(base.limit(limit).offset(offset)).scalars().all()
         return total, [p.as_dict() for p in rows]
 
 

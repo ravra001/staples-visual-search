@@ -373,16 +373,38 @@ def _page(items, limit, offset):
     return total, window
 
 
+def _quality_key(p):
+    """Same review-count-shrunk formula as agent.py's _quality_score (kept
+    as a separate one-line copy rather than a cross-module import -- this
+    is a plain listing-sort helper, not part of the chat agent)."""
+    rating = p.get("rating") or 0
+    reviews = p.get("reviews") or 0
+    return rating * reviews / (reviews + 20)
+
+
+def _deals_key(p):
+    list_price = p.get("list_price") or 0
+    return (list_price - p.get("price", 0)) / list_price if list_price > 0 else 0.0
+
+
 @app.get("/api/products")
-def list_products(category: str | None = None, limit: int | None = config.PAGE_SIZE, offset: int = 0):
+def list_products(category: str | None = None, limit: int | None = config.PAGE_SIZE, offset: int = 0,
+                   sort: str | None = None):
+    """sort: None (default) | "deals" | "popular" -- see get_products_page's
+    docstring for why this exists (the homepage's "Deals"/"Popular" rails
+    used to be two arbitrary slices of the same unsorted list)."""
     if DATA_BACKEND == "sql":
         # Paginated in SQL (LIMIT/OFFSET) — never fetches the whole table just
         # to slice one page of it (see get_products_page's docstring).
         offset = max(int(offset), 0)
         limit = max(1, min(int(limit), _MAX_PAGE_SIZE)) if limit is not None else _MAX_PAGE_SIZE
-        total, window = sql_repo.get_products_page(category, limit, offset)
+        total, window = sql_repo.get_products_page(category, limit, offset, sort)
     else:
         items = get_products_by_category(category) if category else get_all_products()
+        if sort == "deals":
+            items = sorted(items, key=_deals_key, reverse=True)
+        elif sort == "popular":
+            items = sorted(items, key=_quality_key, reverse=True)
         total, window = _page(items, limit, offset)
     return {"count": total, "offset": offset, "limit": limit,
             "items": [_serialize(p) for p in window]}

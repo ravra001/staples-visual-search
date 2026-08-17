@@ -415,11 +415,11 @@ function wireProductCardInteractions(container) {
   });
 }
 
-async function renderProductRail(elId, { category, limit = 12, offset = 0 } = {}) {
+async function renderProductRail(elId, { category, limit = 12, offset = 0, sort = null } = {}) {
   const el = document.getElementById(elId);
   if (!el) return;
   el.innerHTML = `<div class="state-msg"><div class="spinner"></div>Loading…</div>`;
-  const q = (cat, off) => `${API_BASE}/api/products?${cat ? `category=${encodeURIComponent(cat)}&` : ""}limit=${limit}&offset=${off}`;
+  const q = (cat, off) => `${API_BASE}/api/products?${cat ? `category=${encodeURIComponent(cat)}&` : ""}${sort ? `sort=${sort}&` : ""}limit=${limit}&offset=${off}`;
   try {
     let res = await fetch(q(category, offset));
     if (!res.ok) throw new Error("Could not load products");
