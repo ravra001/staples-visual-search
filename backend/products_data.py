@@ -121,11 +121,22 @@ def load_catalog_file(catalog_file):
     """Parse a catalog JSON file, dropping private ingest-only fields (keys
     starting with "_"). Factored out so init_and_seed (products_repo_sql.py)
     can load the real catalog explicitly under DATA_BACKEND=sql, where
-    PRODUCTS below is deliberately NOT the full file (see comment there)."""
+    PRODUCTS below is deliberately NOT the full file (see comment there).
+
+    Dedupes by sku (verified: catalog_abo.json has 33 duplicate SKUs),
+    keeping the LAST occurrence -- same rule init_and_seed uses to satisfy
+    the sql table's primary key, so both backends see the same catalog
+    instead of the memory backend silently keeping duplicate rows that
+    surface as the same product appearing twice in search/similar results."""
     path = catalog_file if os.path.isabs(catalog_file) else os.path.join(os.path.dirname(__file__), catalog_file)
     with open(path, encoding="utf-8") as f:
         loaded = json.load(f)
-    return [{k: v for k, v in p.items() if not k.startswith("_")} for p in loaded]
+    items = [{k: v for k, v in p.items() if not k.startswith("_")} for p in loaded]
+    before = len(items)
+    items = list({p["sku"]: p for p in items}.values())
+    if before != len(items):
+        print(f"[catalog] NOTE: catalog had {before - len(items)} duplicate SKU(s) — deduped (kept last occurrence).")
+    return items
 
 
 _CATALOG_FILE = config.CATALOG_FILE

@@ -393,11 +393,15 @@ def list_products(category: str | None = None, limit: int | None = config.PAGE_S
     """sort: None (default) | "deals" | "popular" -- see get_products_page's
     docstring for why this exists (the homepage's "Deals"/"Popular" rails
     used to be two arbitrary slices of the same unsorted list)."""
+    # Clamped once, above the branch, so both backends echo the SAME limit
+    # back in the response -- the sql branch used to clamp only on its own
+    # side, so ?limit=999999 on the memory backend echoed the raw value
+    # back while actually returning a normal-sized page.
+    offset = max(int(offset), 0)
+    limit = max(1, min(int(limit), _MAX_PAGE_SIZE)) if limit is not None else _MAX_PAGE_SIZE
     if DATA_BACKEND == "sql":
         # Paginated in SQL (LIMIT/OFFSET) — never fetches the whole table just
         # to slice one page of it (see get_products_page's docstring).
-        offset = max(int(offset), 0)
-        limit = max(1, min(int(limit), _MAX_PAGE_SIZE)) if limit is not None else _MAX_PAGE_SIZE
         total, window = sql_repo.get_products_page(category, limit, offset, sort)
     else:
         items = get_products_by_category(category) if category else get_all_products()
@@ -1336,16 +1340,23 @@ def _do_agent_chat(message, history, last_items=None, image_bytes=None, image_mi
                                 key=lambda i: i["price"])
                         except (TypeError, ValueError):
                             pass
-                    bundle = None
                     tool_result = {"count": len(result_items), "items": agent.trim_items_for_model(result_items)}
                     new_items = result_items
             elif name == "find_deals":
-                bundle = agent.find_deals(args.get("category"), args.get("min_discount_pct"))
-                tool_result = agent.trim_room_bundle_for_model(bundle)
-                new_items = list(bundle.get("items") or [])
+                deals = agent.find_deals(args.get("category"), args.get("min_discount_pct"))
+                # No "Add all to cart" bundle assigned here on purpose --
+                # unlike plan_room_setup/plan_office_setup, these items
+                # aren't a coherent multi-item plan, just unrelated products
+                # that happen to be discounted (see the bundle-not-reset
+                # comment above: leaving `bundle` untouched, not nulling it,
+                # is what lets an earlier bundle from this same turn keep
+                # its "Add all to cart" button).
+                new_items = [_serialize(p) for p in (deals.get("items") or [])]
+                tool_result = {k: v for k, v in deals.items() if k != "items"}
+                tool_result["items"] = agent.trim_items_for_model(new_items)
             elif name == "compare_products":
                 result = agent.compare_products(args.get("skus") or [])
-                new_items = [_serialize(p) for p in result["items"]]
+                new_items = [_serialize(p) for p in result["items"]] if result["feasible"] else []
                 tool_result = {"feasible": result["feasible"], "missing": result["missing"],
                                 "items": agent.trim_items_for_model(new_items, cap=4)}
             else:
