@@ -22,8 +22,8 @@
       <a href="/architecture.html" class="pitch-cta-ghost">See the architecture</a>
     </div>
     <div class="pitch-stats">
-      <div class="pitch-stat"><b>10,000</b><span>real products, real photos<br/>(Amazon Berkeley Objects)</span></div>
-      <div class="pitch-stat"><b>7</b><span>ways to search — photo, text-refine,<br/>find-similar, room, crop, price, semantic text</span></div>
+      <div class="pitch-stat"><b>~10,000</b><span>real products, real photos<br/>(Amazon Berkeley Objects)</span></div>
+      <div class="pitch-stat"><b>8</b><span>ways to search — photo, text-refine, find-similar,<br/>room, crop, price, semantic text, Staples AI chat</span></div>
       <div class="pitch-stat"><b>&lt;1s</b><span>warm search latency<br/>on live Cloud Run + Cloud SQL</span></div>
       <div class="pitch-stat"><b>Live</b><span>not a mockup — a real<br/>Cloud Run URL, right now</span></div>
     </div>
@@ -45,11 +45,12 @@
   <!-- ============ WHAT WE BUILT ============ -->
   <section class="pitch-section">
     <p class="pitch-kicker">What we built</p>
-    <h2>Seven ways to search, one shared engine underneath</h2>
+    <h2>Eight ways to search, one shared engine underneath</h2>
     <p class="pitch-lead">Every mode below is a variation on the same core idea — turn something into a
-       vector, compare it to the catalog — not seven separate features bolted together. That's why adding
+       vector, compare it to the catalog — not eight separate features bolted together. That's why adding
        text refinement to "Find Similar" after it already worked for photo search was a small change, not a
-       new subsystem.</p>
+       new subsystem. Staples AI is the one exception worth calling out: it doesn't add a new way of
+       matching products, it adds a conversational front end over the other seven.</p>
     <div class="pitch-feature-grid">
 
       <div class="pitch-feature-card">
@@ -134,6 +135,19 @@
         <span class="pitch-feature-value">ML for what it's good at, plain data for the rest</span>
       </div>
 
+      <div class="pitch-feature-card">
+        <div class="pitch-feature-icon">
+          <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2"><path d="M8 10h8M8 14h5M21 12c0 4.42-4.03 8-9 8-1.06 0-2.08-.16-3.02-.46L3 21l1.6-4.28C3.6 15.4 3 13.76 3 12c0-4.42 4.03-8 9-8s9 3.58 9 8Z"/></svg>
+        </div>
+        <h3>Staples AI</h3>
+        <p>A Gemini tool-calling chat, in-process in the same Cloud Run service — eleven tools, every one a
+           thin wrapper over the deterministic search/CV/pricing logic above, never LLM arithmetic. Plan an
+           office or room within budget, find real deals, compare products head-to-head, swap a bundle item
+           for something cheaper or nicer, or attach a photo of a receipt or handwritten list and reorder it.
+           If Vertex isn't reachable, it degrades honestly to plain search instead of pretending.</p>
+        <span class="pitch-feature-value">Conversational front end, zero new matching logic to trust</span>
+      </div>
+
     </div>
   </section>
 
@@ -175,8 +189,9 @@
     <p class="pitch-kicker">Not a demo — a deployment</p>
     <h2>Running on real GCP infrastructure, with real production bugs found and fixed</h2>
     <p class="pitch-lead">This is deployed on Cloud Run, backed by a real Cloud SQL + pgvector instance
-       seeded with all 10,000 products. Building it for real — not just describing the architecture — is
-       what surfaced these:</p>
+       seeded with all 9,967 unique products (the source catalog has 10,000 rows but 33 duplicate SKUs —
+       deduped at seed time). Building it for real — not just describing the architecture — is what
+       surfaced these:</p>
     <div class="pitch-proof-row">
       <div class="pitch-proof-card">
         <h4>✓ HNSW recall bug, found &amp; fixed</h4>

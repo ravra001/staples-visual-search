@@ -10,7 +10,7 @@ There are two ways to run it:
 | Mode | Photo-search quality | Install weight | Internet needed |
 |------|----------------------|----------------|-----------------|
 | **A. Heuristic** (default) | Colour/shape similarity — decent | tiny (~30 MB) | none |
-| **B. CLIP** (recommended) | Real semantic similarity — great | large (~2 GB) | yes, first run only (downloads the model) |
+| **B. CLIP** (recommended) | Real semantic similarity — great | large (~2 GB) | no — model ships bundled, fully offline (see below) |
 
 Both use the same 10k catalog and the same UI. Start with **Mode A** to confirm
 it runs, then switch to **Mode B** for the good search.
@@ -137,7 +137,7 @@ prebuilt, so startup is instant.
 
 ---
 
-## Step 4 — Open it
+## Step 3 — Open it
 
 Go to **http://localhost:8000** in your browser.
 
@@ -151,6 +151,15 @@ http://localhost:8000/api/config
 Try it: click the **camera icon** in the search bar (or the hero "Try Visual
 Search" button), pick any furniture / lighting / décor / office photo, and you'll
 get visually similar products ranked by match score.
+
+**"Staples AI" chat runs in degraded mode without a GCP project.** The homepage's
+right-hand "Staples AI" column and its chat panel need a real Vertex AI (Gemini)
+connection — `embedding.vertex.project` in `config.yaml` or `GCP_PROJECT` — which
+this local-only setup doesn't have. Without it, every chat message still returns
+a real answer (it silently falls back to plain hybrid search, `degraded: true` in
+the response), just without the model's tool-calling — no office/room planning,
+deals, comparisons, or receipt reading. This is expected, not a bug; see
+`GCP_SETUP.md` if you want the full chat experience locally too.
 
 ---
 

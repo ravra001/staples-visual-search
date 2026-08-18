@@ -8,7 +8,7 @@
 #
 # Build (from the repo root):
 #   gcloud builds submit --tag <region>-docker.pkg.dev/<project>/<repo>/staples-visual-search
-# (Cloud Build — no local Docker needed. See DEPLOY.md for the full flow.)
+# (Cloud Build — no local Docker needed. See GCP_SETUP.md for the full flow.)
 
 FROM python:3.13-slim
 
@@ -47,7 +47,7 @@ ENV HOST=0.0.0.0
 ENV EMBEDDING_BACKEND=clip
 ENV DATA_BACKEND=sql
 ENV CATALOG_FILE=data/catalog_abo.json
-# DATABASE_URL is supplied at deploy time via Secret Manager (see DEPLOY.md) —
+# DATABASE_URL is supplied at deploy time via Secret Manager (see GCP_SETUP.md) —
 # never baked into the image.
 
 WORKDIR /app/backend

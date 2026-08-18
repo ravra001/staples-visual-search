@@ -1,12 +1,27 @@
 # Staples Visual Search — Hackathon Prototype
 
-A "search by photo" feature bolted onto a Staples.com-style storefront, backed
-by a real ~10,000-product catalog (Amazon Berkeley Objects, restyled) and real
-CLIP embeddings. Upload a photo of a chair, lamp, rug, or other home/office
-item via the camera icon in the search bar, and it ranks the catalog by
-visual similarity — with text-refined queries ("but in black"), crop-to-search,
-"find similar" from any product, and an honest "no strong matches" state when
-the photo genuinely isn't in the catalog.
+A Staples.com-style storefront with two search/shopping surfaces bolted on,
+backed by a real ~10,000-product catalog (Amazon Berkeley Objects, restyled)
+and real CLIP embeddings:
+
+- **Search by photo** — upload a photo of a chair, lamp, rug, or other
+  home/office item via the camera icon in the search bar, and it ranks the
+  catalog by visual similarity. Text-refined queries ("but in black"),
+  crop-to-search, "find similar" from any product, "Complete the Look"
+  cross-sell, and **Shop the Room** — one photo of a whole room (or a supply
+  shelf, for a B2B reorder framing) returns one best-matching product per
+  distinct item detected, not a pile of near-duplicates.
+- **Staples AI** — a Gemini (Vertex AI) tool-calling chat, in-process in the
+  same FastAPI service. Eleven tools, every one a thin wrapper over
+  deterministic Python/SQL that already exists elsewhere in this app (see
+  `backend/agent.py`'s module docstring for the full list) — plan an office
+  or room setup within budget, find deals, compare products, swap a bundle
+  item for something cheaper/nicer, or reorder from a photographed receipt
+  or shopping list. Falls back to plain hybrid search (`degraded: true`)
+  if Vertex isn't configured, rather than pretending to be smarter than it is.
+
+Also: hybrid keyword+semantic text search (the header search bar), and an
+honest "no strong matches" state when a photo genuinely isn't in the catalog.
 
 This runs two ways: **fully offline** (in-memory catalog, bundled CLIP model,
 zero cloud calls — the fast-iteration/local-dev path), or **deployed on GCP**
@@ -43,25 +58,46 @@ from the `backend/` directory.)
 
 ```
 backend/
-  main.py              FastAPI app: serves the frontend + JSON API
+  main.py              FastAPI app: all HTTP endpoints, the visual-search/
+                       Shop the Room/hybrid-search pipeline, and _do_agent_chat
+                       (Staples AI's orchestration loop over agent.py's tools).
+  agent.py             Staples AI: Gemini tool declarations + the deterministic
+                       catalog-math tools it calls (find_deals, compare_products,
+                       plan_office_setup, swap_bundle_item, ...). See its module
+                       docstring for the full eleven-tool list.
+  config.py / config.yaml   ALL configuration lives here (no scattered env vars).
   products_data.py     Catalog repository. Pluggable: in-memory (default, loads
                        the 30-item built-in demo OR the 10k ABO set via
                        CATALOG_FILE) OR Cloud SQL, via DATA_BACKEND.
-  products_repo_sql.py Cloud SQL (Postgres) implementation of the repository.
+  products_repo_sql.py Cloud SQL (Postgres + pgvector) implementation — what's
+                       actually deployed in production (DATA_BACKEND=sql).
   embeddings.py        Pluggable image embedding: heuristic (default) / local CLIP /
-                       Vertex AI, via EMBEDDING_BACKEND. + cosine similarity.
+                       Vertex AI, via EMBEDDING_BACKEND.
+  text_match.py         Keyword-side matching for hybrid text search (fused with
+                       CLIP-text semantic ranking via Reciprocal Rank Fusion).
   generate_images.py   One-time script that drew the placeholder product photos
-  static/images/products/   Generated product images (PNG)
+  static/images/products/   Generated product images (PNG) + the 10k ABO photos
   ingest_abo.py        Builds a ~10k real-name / real-image catalog from the open
                        Amazon Berkeley Objects dataset (demo/non-commercial).
+  build_staples_catalog.py, fix_catalog_categories.py,
+  apply_category_corrections.py   One-off catalog-cleanup scripts run once
+                       against catalog_abo.json, not part of the live app.
   build_index.py       Precomputes + caches the embedding index (fast startup at scale).
   test_gcp.py          Smoke-tests the Vertex AI + Cloud SQL backends once you auth.
 frontend/
-  index.html           Homepage (hero, featured products, category grid, rails)
+  index.html           Homepage — two-column hero (Visual Search / Staples AI,
+                       each with click-to-try examples), featured products,
+                       category grid, Deals/Popular rails.
   category.html        Listing page — powers both category browsing AND text search
-  product.html         Product detail page (PDP) with "you may also like"
-  architecture.html    Visual architecture (on-prem + GCP) — open via the ☰ menu
+  product.html         Product detail page (PDP) with Visually Similar / Complete
+                       the Look / Similar for Less rails
   visual-search.html   Visual search results page
+  shop-the-room.html   Shop the Room results page (one match per detected item)
+  cart.html            Real cart page (line items, quantities — not just a counter)
+  how-it-works.html    The current, detailed architecture walkthrough — prefer
+                       this over HOW_IT_WORKS.md, which predates most of this list.
+  architecture.html    Visual architecture diagram (on-prem + GCP) — ☰ menu
+  pitch.html           Demo/pitch page
   assets/style.css     Staples-style visual language (exact brand red #CC0000)
   assets/app.js        All client-side logic — no build step, no framework
 requirements.txt       Base deps (heuristic + in-memory — runs with zero extras)
@@ -129,17 +165,21 @@ The defaults need **no** extra dependencies and run fully offline.
 > the stale cache is refused (no silent mis-ranking).
 
 ```yaml
-# Real learned embeddings, still 100% offline (needs the clip extra):
+# What's actually deployed (Cloud Run): local CLIP + Cloud SQL/pgvector.
+# CLIP was benchmarked against Vertex AI Multimodal Embeddings and kept —
+# see how-it-works.html's "Where this maps to GCP" section for the numbers
+# (CLIP ties/leads recall@5+ at $0 marginal cost vs. Vertex's better
+# recall@1 at ~$0.0001/image and 3-4x the latency).
 embedding:
   backend: clip
-
-# Production target — Vertex AI embeddings + Cloud SQL:
-embedding:
-  backend: vertex
-  vertex: { project: my-proj }
 data:
   backend: sql
   database_url: postgresql+psycopg://user:pass@host/staples
+
+# Vertex AI embeddings are also wired up and switchable (needs GCP_PROJECT):
+embedding:
+  backend: vertex
+  vertex: { project: my-proj }
 ```
 
 Then `uv run python backend/run.py`. Every setting also accepts an environment
@@ -154,10 +194,13 @@ reports which backends are live. Switching backends changes nothing else —
    Search" button) and picks a photo.
 2. The browser POSTs the image to `POST /api/visual-search`.
 3. The backend computes a feature vector for the uploaded image using the active
-   `EMBEDDING_BACKEND` (see `embeddings.py`). Every catalog image was embedded the
-   same way at server startup and cached in memory.
-4. Brute-force cosine similarity ranks the catalog against the query vector; top 8
-   matches are returned with a `match_score`.
+   `EMBEDDING_BACKEND` (see `embeddings.py`).
+4. The catalog side depends on `DATA_BACKEND`: **memory** embeds every catalog
+   image once at startup and ranks with a brute-force NumPy matmul; **sql**
+   (what's deployed) never loads catalog vectors into the process at all — every
+   query is one pgvector HNSW-indexed similarity query straight against Postgres.
+   Either way, up to 48 matches are returned with a `match_score` (`search.top_k`
+   in `config.yaml`).
 5. Results render on `visual-search.html` using the same product tile component as
    the rest of the site.
 
@@ -234,6 +277,11 @@ backend they can hurt match quality.
   (`ingest_abo.py`, see above) is **real product names/photography from the open Amazon
   Berkeley Objects dataset, licensed CC BY-NC 4.0 (non-commercial)** — demo/hackathon use
   only, not a license to ship in any commercial product.
-- Cart persists client-side in `localStorage` (a counter — no checkout).
-- Text search is wired to `GET /api/search` (name/brand/category/description match).
-  Visual search remains the headline feature.
+- Cart is client-side (`localStorage`), but a real one — line items, quantities,
+  a running total on `cart.html` — not just a header counter. No checkout/payment.
+- Text search (the header search bar) is hybrid: keyword matching fused with
+  CLIP-text-vs-catalog-vector semantic ranking via Reciprocal Rank Fusion, plus
+  price-intent parsing ("under $50", "cheaper") handled client-side as a
+  sort/filter rather than sent through the embedding model. Visual search
+  remains the headline feature, but text search and Staples AI are no longer
+  a thin afterthought next to it.
