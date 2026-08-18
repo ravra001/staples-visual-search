@@ -55,6 +55,10 @@
           <span class="hero-samples-label">No idea what to ask? Try one of these:</span>
           <div id="hero-ai-sample-col" class="hero-ai-sample-col"></div>
         </div>
+        <div class="hero-samples">
+          <span class="hero-samples-label">Or attach a photo — try a receipt or a shopping list:</span>
+          <div id="hero-ai-sample-row" class="hero-sample-row"></div>
+        </div>
       </div>
     </div>
   </section>
@@ -104,6 +108,7 @@
   renderRoomSamples('hero-room-sample-row');
   document.getElementById('hero-ai-btn')?.addEventListener('click', openAgentModal);
   renderHeroAIExamples('hero-ai-sample-col');
+  renderHeroAISampleImages('hero-ai-sample-row');
 </script>
 </body>
 </html>

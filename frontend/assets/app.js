@@ -682,6 +682,48 @@ function startAgentQuickPrompt(text) {
   form.requestSubmit();
 }
 
+// Photo samples for the Staples AI column -- match_shopping_list's two
+// photo inputs (a handwritten list, a printed receipt) rather than
+// shop_the_room's room photos, which already have their own samples on
+// the Visual Search side.
+const HERO_AI_SAMPLE_IMAGES = [
+  { file: "/assets/ai-samples/receipt.jpg", label: "Receipt to reorder", prompt: "Reorder everything on this receipt" },
+  { file: "/assets/ai-samples/note.jpg", label: "Handwritten shopping list", prompt: "Find everything on this list" },
+];
+
+function renderHeroAISampleImages(mountId) {
+  const mount = document.getElementById(mountId);
+  if (!mount) return;
+  mount.innerHTML = HERO_AI_SAMPLE_IMAGES.map(({ file, label }) => `
+    <button class="hero-sample-thumb" data-file="${esc(file)}" title="Try &quot;${esc(label)}&quot; with Staples AI">
+      <img src="${esc(file)}" alt="${esc(label)}" loading="lazy" />
+    </button>`).join("");
+  mount.querySelectorAll(".hero-sample-thumb").forEach((btn, i) => {
+    btn.addEventListener("click", async () => {
+      try {
+        const { file, prompt } = HERO_AI_SAMPLE_IMAGES[i];
+        const res = await fetch(file);
+        if (!res.ok) throw new Error(`sample image request failed (${res.status})`);
+        const blob = await res.blob();
+        const dataUrl = await new Promise((resolve, reject) => {
+          const reader = new FileReader();
+          reader.onload = () => resolve(reader.result);
+          reader.onerror = reject;
+          reader.readAsDataURL(blob);
+        });
+        openAgentModal();
+        _agentPendingImage = { b64: dataUrl.split(",")[1] || "", mime: blob.type || "image/jpeg", dataUrl };
+        document.getElementById("vs-agent-image-preview-img").src = dataUrl;
+        document.getElementById("vs-agent-image-preview").hidden = false;
+        startAgentQuickPrompt(prompt);
+      } catch (e) {
+        console.error("Sample AI photo failed:", e);
+        alert("Couldn't load that sample photo. Try uploading your own instead.");
+      }
+    });
+  });
+}
+
 function wireVisualSearch(buttonId, inputId) {
   const btn = document.getElementById(buttonId);
   const input = document.getElementById(inputId);
