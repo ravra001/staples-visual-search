@@ -21,16 +21,17 @@ var:
                         The production target. Requires a GCP project +
                         credentials and `google-cloud-aiplatform`.
 
-`cosine_similarity()` and `top_k_matches()` are backend-agnostic — they don't
-care about vector dimensionality — so switching backends changes nothing
-downstream. The ONLY rule: the catalog index and the query must be embedded by
-the same backend within a single process (guaranteed here, since the backend is
-fixed per process at startup).
+Ranking itself lives elsewhere, not here: main.py's NumPy matmul for the
+memory backend, pgvector's HNSW index for the sql backend (see
+products_repo_sql.search_by_vector). This module's job stops at producing a
+vector; `cosine_similarity()` below is kept only for test_gcp.py's smoke
+test, not as a ranking primitive. The ONLY rule: the catalog index and the
+query must be embedded by the same backend within a single process
+(guaranteed here, since the backend is fixed per process at startup).
 """
 import io
 import os
 import threading
-from typing import List, Tuple
 
 import numpy as np
 from PIL import Image, ImageFilter
@@ -201,7 +202,11 @@ def _embed_clip(image_bytes: bytes) -> np.ndarray:
 
 def embed_text_clip(text: str) -> np.ndarray:
     """CLIP text-tower embedding (same joint space as embed_image), L2-normalized.
-    Catalog-side only — see embed_catalog_item(). Requires the clip backend."""
+    Used both catalog-side (embed_catalog_item()'s text fusion) AND at query
+    time — hybrid text search's semantic leg and text-refinement's blend step
+    (main.py's _semantic_search_skus and the refine_text handling in
+    _do_similar_search/_do_shop_the_room) both call this directly. Requires
+    the clip backend."""
     s = _get_clip()
     torch = s["torch"]
     tokens = s["tokenizer"]([text]).to(s["device"])
@@ -311,12 +316,7 @@ def embed_image(image_bytes: bytes) -> np.ndarray:
 
 
 def cosine_similarity(a: np.ndarray, b: np.ndarray) -> float:
+    """Used only by test_gcp.py's smoke test -- real ranking is NumPy matmul
+    (memory backend) or pgvector's HNSW index (sql backend), not this."""
     denom = (np.linalg.norm(a) * np.linalg.norm(b)) + 1e-8
     return float(np.dot(a, b) / denom)
-
-
-def top_k_matches(query_vec: np.ndarray, catalog: List[Tuple[str, np.ndarray]], k: int = 8):
-    """catalog: list of (sku, vector). Returns list of (sku, similarity) sorted desc."""
-    scored = [(sku, cosine_similarity(query_vec, vec)) for sku, vec in catalog]
-    scored.sort(key=lambda x: x[1], reverse=True)
-    return scored[:k]

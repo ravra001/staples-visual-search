@@ -3,8 +3,11 @@ Staples AI — tool-calling chat agent.
 
 Runs in-process inside the same FastAPI app/Cloud Run service as
 everything else (see main.py's /api/agent/chat and _do_agent_chat) — no
-separate service, no new deployment. Deliberately narrow: five
-LLM-callable tools.
+separate service, no new deployment. Deliberately narrow: eleven
+LLM-callable tools, every one of them a thin wrapper over deterministic
+Python/SQL that already exists elsewhere in this app -- Gemini decides
+WHAT to call and narrates the result, it never computes prices, ranks
+matches, or invents products itself.
 
   search_products       — thin wrapper the ORCHESTRATION loop (main.py)
                            points at the existing hybrid search
@@ -49,7 +52,7 @@ LLM-callable tools.
                            resolving each one to a real catalog SKU is
                            then handed back to the same deterministic
                            search (_hybrid_search) everything else uses.
-  not_shoppable           — the escape hatch for the two tools above. An
+  not_shoppable           — the escape hatch for the two photo tools above. An
                            attached image is forced into calling ONE of
                            shop_the_room/match_shopping_list/not_shoppable
                            (see main.py's _do_agent_chat) so "attach a
@@ -60,6 +63,12 @@ LLM-callable tools.
                            vector-searched, returning confidently wrong
                            furniture instead of declining. This tool lets
                            the model opt out honestly instead.
+  complete_the_look       — one stored product's own vector -> best match
+                           per OTHER category (not the source item's own),
+                           reusing shop_the_room's per-category search
+                           machinery. Same underlying lookup as the
+                           standalone product-page rail, exposed to chat
+                           for "what goes with this desk" style requests.
   swap_bundle_item        — "make the desk cheaper" / "a nicer chair" for
                            any item already known from this conversation
                            (identified by sku, resolved via the existing
@@ -69,6 +78,21 @@ LLM-callable tools.
                            same deterministic-math philosophy as the
                            bundling tools. Works on any item shown, not
                            just ones from a bundle.
+  find_similar            — "like that one but in black" / "the same rug
+                           but under $150" for a known sku. Reuses the exact
+                           same _do_similar_search machinery as the
+                           standalone /similar endpoint, so refine_text and
+                           max_price behave identically everywhere.
+  find_deals               — real list_price-vs-price discounts, optionally
+                           scoped to a category and/or a minimum discount
+                           percent. Plain sort over the catalog, not a model
+                           guess at what's "on sale."
+  compare_products         — pulls real price/rating/review data for 2-4
+                           named skus so the model writes a tradeoff
+                           comparison grounded in actual numbers instead of
+                           paraphrasing from memory (see the system
+                           prompt's compare_products carve-out: it's the
+                           one tool allowed to state real numbers back).
 
 Cart-adding is NOT a tool the model calls directly. A single searched
 product already has a working Add-to-cart button on its product card (see

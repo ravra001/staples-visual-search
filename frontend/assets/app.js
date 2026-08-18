@@ -1506,15 +1506,16 @@ function renderMobileScanLanding() {
 }
 
 // ---------- Staples AI chat ----------
-// A small chat modal that talks to POST /api/agent/chat (backend/agent.py).
-// The model can call two tools server-side: search_products (renders
-// product cards, same productCardHTML/wireProductCardInteractions as
-// everywhere else) and plan_office_setup (renders those cards plus one
-// "Add all to cart" action for the whole bundle). No client-side tool
-// execution and no single-SKU "add to cart" from chat -- every product
-// card already has its own Add button, so that would be redundant; see
-// how-it-works.html for why the bundle case is the one genuinely new
-// action worth adding here.
+// A small chat modal that talks to POST /api/agent/chat (backend/agent.py,
+// eleven tools -- see that module's docstring for the full list). Every
+// tool response renders through the same two shapes: product cards (same
+// productCardHTML/wireProductCardInteractions as everywhere else) and,
+// for the bundle-producing tools only (plan_office_setup/plan_room_setup/
+// match_shopping_list), one extra "Add all to cart" action for the whole
+// bundle. No client-side tool execution and no single-SKU "add to cart"
+// from chat -- every product card already has its own Add button, so
+// that would be redundant; see how-it-works.html for why the bundle case
+// is the one genuinely new action worth adding here.
 let _agentModalBuilt = false;
 let _agentHistory = []; // [{role: "user"|"model", text}] -- sent to the API as conversation context
 // Mirrors what's rendered in the chat panel -- persisted to sessionStorage

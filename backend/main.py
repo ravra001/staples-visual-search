@@ -1,12 +1,19 @@
 """
 Staples-style visual search demo — FastAPI backend.
 
-In-memory catalog + brute-force cosine similarity for now. See
-products_data.py and embeddings.py for the two intended swap points:
-  - products_data.py -> Cloud SQL (Postgres) repository
-  - embeddings.py     -> Vertex AI Multimodal Embeddings + (optionally)
-                          Vertex AI Vector Search, once the catalog is large
-                          enough that brute force stops being instant.
+Two backends, chosen via config (DATA_BACKEND / EMBEDDING_BACKEND), both
+live and in production use:
+  - products_data.py -> in-memory catalog (dev/demo) OR products_repo_sql.py
+                         -> Cloud SQL (Postgres + pgvector), the one this
+                         service actually runs under on Cloud Run.
+  - embeddings.py     -> local CLIP (bundled in the container, what's
+                         deployed) OR Vertex AI Multimodal Embeddings
+                         (benchmarked, not used — see how-it-works.html's
+                         "Where this maps to GCP" section for the numbers).
+
+Also home to agent.py's orchestration loop (_do_agent_chat) — the Staples
+AI chat's eleven tools are thin wrappers over the same search/CV pipeline
+defined below, not a separate implementation.
 """
 import base64
 import os

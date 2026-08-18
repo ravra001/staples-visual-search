@@ -148,8 +148,11 @@
           <p style="font-size:12.5px;color:var(--gray-text);margin:10px 0 0;">HNSW is <em>approximate</em>:
              its default search breadth (<code>ef_search=40</code>) was found — via a real production bug —
              to be too narrow for this catalog size and could miss the true nearest neighbors for ambiguous
-             queries. Fixed by raising it to 200 per-query (<code>SET LOCAL</code>, scoped to one
-             transaction). See <code>GCP_SETUP.md</code> for the full story.</p>
+             queries. Fixed by raising it per-query (<code>SET LOCAL</code>, scoped to one transaction) to
+             200 catalog-wide, or 400 when a category filter is set — a category filter is applied
+             <em>after</em> the graph walk picks its top-k neighbors, so too few landing in the target
+             category can silently return fewer rows than asked for; widening the search further
+             compensates. See <code>GCP_SETUP.md</code> for the full story.</p>
         </div>
       </div>
     </div>
@@ -330,8 +333,10 @@
           confidence threshold — that threshold is calibrated for "should we auto-scope a whole clean
           photo," and a small cropped tile is inherently less certain even when its guess is right (verified:
           a lamp tile classified at only 36% confidence still found the exact correct lamp at 77% match).
-          What <em>does</em> gate a tile is whether its top product match clears the normal match threshold —
-          a blank wall or floor tile just won't find anything above that bar and is silently skipped.</li>
+          What <em>does</em> gate a tile is whether its top product match clears a threshold — but a
+          dedicated, slightly lower one (<code>SHOP_ROOM_MATCH_THRESHOLD</code>, 50 vs. the global search's
+          55), since a cropped tile is a structurally weaker query than a clean single-object photo. A
+          blank wall or floor tile just won't find anything above that bar and is silently skipped.</li>
       <li>If two tiles land on the same category, only the higher-scoring one survives. Results are capped
           at 6 distinct categories, sorted by score.</li>
     </ol>
@@ -376,7 +381,7 @@
     <p class="arch-lead">The "Staples AI" chat panel runs Gemini (Vertex AI) as a tool-calling
        orchestrator <em>in-process</em>, inside this same Cloud Run service — not a separate
        deployment. It never invents product data, prices, or matches itself: every reply is Gemini
-       deciding <em>which</em> of eight tools to call and narrating what that tool's real, deterministic
+       deciding <em>which</em> of eleven tools to call and narrating what that tool's real, deterministic
        Python implementation actually returned. The tools:</p>
     <div class="table-scroll">
       <table class="arch-table">
@@ -409,25 +414,29 @@
          <em>when</em> to call the tool; it never computes a price.</p>
     </div>
     <div class="doc-callout">
-      <h3>One photo, two different divisions of labor</h3>
-      <p>Attaching a photo to the chat routes to one of two tools, and each deliberately assigns the
-         "seeing" differently. For <code>shop_the_room</code>, Gemini's vision narrates what it
-         sees but the real embedding pipeline finds the matches — same reasoning as every other
-         search in this app, vision never substitutes for a vector search against the actual
-         catalog. For <code>match_shopping_list</code>, it's the opposite split: reading messy
-         real-world handwriting or a receipt is exactly what an LLM is good at and there's no
-         deterministic OCR step to reuse, so Gemini reads it and extracts <code>{query, quantity}</code>
-         pairs itself — but resolving each one to a real SKU is handed back to the same
-         deterministic search everything else uses. A model can decide something IS an image; the
-         actual bytes never round-trip through a function-call argument, and the real matching
-         logic never trusts the model's own guess at what a product is.</p>
+      <h3>One photo, three possible tools, two different divisions of labor</h3>
+      <p>Attaching a photo forces Gemini to call exactly one of <code>shop_the_room</code>,
+         <code>match_shopping_list</code>, or <code>not_shoppable</code> — never free-form prose about
+         the picture — and the first two deliberately assign the "seeing" differently. For
+         <code>shop_the_room</code>, Gemini's vision narrates what it sees but the real embedding
+         pipeline finds the matches — same reasoning as every other search in this app, vision never
+         substitutes for a vector search against the actual catalog. For <code>match_shopping_list</code>,
+         it's the opposite split: reading messy real-world handwriting or a receipt is exactly what an
+         LLM is good at and there's no deterministic OCR step to reuse, so Gemini reads it and extracts
+         <code>{query, quantity}</code> pairs itself — but resolving each one to a real SKU is handed
+         back to the same deterministic search everything else uses. <code>not_shoppable</code> exists
+         because forcing a choice between only the first two meant an irrelevant photo (a pet, an
+         unrelated screenshot) still got tiled and vector-searched, returning confidently wrong
+         furniture instead of declining — see the tool table above. A model can decide something IS an
+         image; the actual bytes never round-trip through a function-call argument, and the real
+         matching logic never trusts the model's own guess at what a product is.</p>
     </div>
     <p class="arch-lead">Two smaller but load-bearing decisions: the chat resends whatever product
        cards are currently on screen as short context on every turn, so a follow-up like "the
        cheaper one" or "just the chair" resolves against what was actually shown instead of nothing
        (the model is deliberately told never to state a price/sku itself, so without this it never
        otherwise learns what it displayed). And the turn a photo is attached forces Gemini into one
-       of the two image tools via Vertex's function-calling <code>ANY</code> mode, rather than
+       of the three image tools via Vertex's function-calling <code>ANY</code> mode, rather than
        leaving it free to just describe the picture in prose — "attach a photo and nothing happens"
        was a real failure mode until that was locked down. If Vertex/Gemini errors or isn't
        configured, the endpoint falls back to the plain hybrid search and says so honestly
