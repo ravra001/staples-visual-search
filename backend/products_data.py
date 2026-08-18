@@ -179,6 +179,29 @@ def _mem_by_category(category, order_by_price=False):
         items = sorted(items, key=lambda p: p.get("price") or float("inf"))
     return items
 
+def _deal_discount_ratio(p):
+    """Raw (unrounded) discount ratio -- the SAME formula
+    products_repo_sql.get_deals_page/get_products_page(sort="deals") ORDER
+    BY in SQL, so a min_discount_pct floor and the homepage rail's ordering
+    agree at the boundary instead of a rounded-vs-raw mismatch letting a
+    29.6%-off item pass one and not the other."""
+    list_price = p.get("list_price") or 0
+    return (list_price - p.get("price", 0)) / list_price if list_price > 0 else 0.0
+
+
+def _mem_categories():
+    return sorted({p["category"] for p in PRODUCTS})
+
+
+def _mem_deals(category=None, min_discount_pct=None, limit=8):
+    pool = [p for p in PRODUCTS if p["category"] == category] if category is not None else PRODUCTS
+    deals = sorted(pool, key=_deal_discount_ratio, reverse=True)
+    if min_discount_pct is not None:
+        floor = float(min_discount_pct) / 100.0
+        deals = [p for p in deals if _deal_discount_ratio(p) >= floor]
+    return deals[:limit]
+
+
 def _mem_search(query):
     """AND-across-terms substring match, ordered by relevance (how many
     terms matched in the NAME specifically -- a stronger signal than a term
@@ -219,6 +242,8 @@ if DATA_BACKEND == "sql":
         get_products_by_skus,
         get_products_by_category,
         search_products,
+        get_deals_page as get_deals,
+        get_categories,
     )
 else:
     get_all_products = _mem_all
@@ -226,6 +251,8 @@ else:
     get_products_by_skus = _mem_by_skus
     get_products_by_category = _mem_by_category
     search_products = _mem_search
+    get_deals = _mem_deals
+    get_categories = _mem_categories
 
 
 def catalog_content_hash(products=None):

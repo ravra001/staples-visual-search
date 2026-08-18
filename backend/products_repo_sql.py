@@ -361,6 +361,34 @@ def get_products_page(category=None, limit=24, offset=0, sort=None):
         return total, [p.as_dict() for p in rows]
 
 
+def get_deals_page(category=None, min_discount_pct=None, limit=8):
+    """SQL-pushed-down version of agent.find_deals's ranking -- the exact
+    same discount expression get_products_page(sort="deals") already
+    computes for the homepage rail, with an optional floor and a LIMIT
+    applied IN the query instead of fetching the whole catalog into Python
+    to sort/filter a handful of rows out of it (verified: a catalog-wide
+    find_deals used to fetch all ~10k rows, full description text
+    included, over the wire for every "what's on sale?" chat turn).
+    min_discount_pct is compared against the SAME raw ratio expression
+    get_products_page's sort="deals" orders by (not a rounded percentage),
+    so a discount floor here agrees with the homepage rail's ordering at
+    the boundary instead of the two silently disagreeing near a round
+    number."""
+    with SessionLocal() as s:
+        discount = case(
+            (Product.list_price > 0, (Product.list_price - Product.price) / Product.list_price),
+            else_=0.0,
+        )
+        stmt = select(Product).options(defer(Product.embedding), defer(Product.image_embedding))
+        if category is not None:
+            stmt = stmt.where(Product.category == category)
+        if min_discount_pct is not None:
+            stmt = stmt.where(discount >= min_discount_pct / 100.0)
+        stmt = stmt.order_by(discount.desc(), Product.sku).limit(limit)
+        rows = s.execute(stmt).scalars().all()
+        return [p.as_dict() for p in rows]
+
+
 def count_by_category(category=None):
     """Used for the "searched" field (how many rows were actually eligible) —
     the SQL analogue of counting a category mask over the in-memory matrix."""

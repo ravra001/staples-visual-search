@@ -104,19 +104,26 @@ response shape, not something the model decides to call.
 """
 import re
 import sys
+import threading
 import time
 import traceback
 
 import config
-from products_data import get_all_products, get_product_by_sku, get_products_by_category
+from products_data import get_product_by_sku, get_products_by_category, get_deals, get_categories
 
 _agent_state = {}
+_agent_load_lock = threading.Lock()
 
 
 def _get_agent_model():
     """Lazy-load the Gemini model once per process, mirroring
-    embeddings.py's _get_vertex() pattern exactly (same project,
-    same credentials, different Vertex API).
+    embeddings.py's _get_clip() pattern exactly: a lock + double-check, not
+    just a bare `if _agent_state: return` -- without it, two concurrent
+    first-requests (plausible under Cloud Run's --concurrency=20) could
+    both see an empty _agent_state and both start initializing, and the
+    second one's _agent_state.update() partially overwriting the first's
+    mid-flight is a real race, not a hypothetical one (same reasoning
+    embeddings.py's docstring gives for CLIP's version of this lock).
 
     Retries the Vertex init + model construction once on failure -- a
     freshly cold-started Cloud Run instance's first Vertex auth handshake
@@ -130,6 +137,13 @@ def _get_agent_model():
     through to the honest degraded response in main.py."""
     if _agent_state:
         return _agent_state
+    with _agent_load_lock:
+        if _agent_state:  # someone else finished loading while we waited for the lock
+            return _agent_state
+        return _load_agent_model()
+
+
+def _load_agent_model():
     try:
         import vertexai
         from vertexai.generative_models import GenerativeModel, Tool
@@ -188,7 +202,10 @@ def _get_agent_model():
             "context or a prior search result) and asks what else goes with it, e.g. 'what else do I "
             "need for this desk?' -- search_products first if you don't already have its sku. "
             "Use find_deals when the user asks about discounts/sales, e.g. 'what's on sale in "
-            "lighting?' or 'anything over 30% off?'. "
+            "lighting?' or 'anything over 30% off?'. If its result has requested_category_not_found, "
+            "say so honestly (e.g. \"no wall art deals right now, but here's what's on sale "
+            "catalog-wide\") rather than presenting catalog-wide results as if they matched the "
+            "category asked for. "
             "Keep replies to 2-3 sentences. Never state a specific price or SKU yourself -- the "
             "product cards already shown to the user have that; just refer to items by name. The ONE "
             "exception is compare_products: when narrating its result, DO state the real prices/"
@@ -584,8 +601,15 @@ def plan_office_setup(people_count, budget):
     except (TypeError, ValueError):
         return {"feasible": False, "reason": "Could not understand the headcount or budget given."}
 
-    desks = get_products_by_category("desks", order_by_price=True)
-    chairs = _office_chairs_only(get_products_by_category("chairs", order_by_price=True))
+    # The 10k ABO catalog uses plural category names ("desks"/"chairs"); the
+    # small built-in demo catalog (products_data.py, used when catalog_file
+    # is unset) uses singular ("desk"/"chair") -- without this fallback,
+    # running this tool -- the FIRST hero chip on the homepage -- against
+    # the demo catalog always answered "no desks or chairs available."
+    desks = get_products_by_category("desks", order_by_price=True) or \
+        get_products_by_category("desk", order_by_price=True)
+    chairs = _office_chairs_only(get_products_by_category("chairs", order_by_price=True) or
+                                  get_products_by_category("chair", order_by_price=True))
     if not desks or not chairs:
         return {"feasible": False, "reason": "The catalog has no desks or chairs available right now."}
 
@@ -827,36 +851,50 @@ def swap_bundle_item(sku, direction):
     }
 
 
-def _discount_pct(p):
-    list_price = p.get("list_price") or 0
-    return round(100 * (list_price - p.get("price", 0)) / list_price) if list_price > 0 else 0
-
-
 def find_deals(category=None, min_discount_pct=None):
     """Real discount data (list_price vs price), not a model guess -- same
     deterministic-math philosophy as every other tool here. category is
-    optional (catalog-wide if omitted) -- get_all_products/
-    get_products_by_category both defer the pgvector columns, so a
-    catalog-wide call doesn't drag 10k rows of embedding data over the
-    wire for fields never read here."""
-    category = (category or "").strip().lower() or None
-    pool = get_products_by_category(category) if category else get_all_products()
-    if not pool:
-        return {"feasible": False, "reason": f"No products found{f' in {category!r}' if category else ''}."}
+    optional (catalog-wide if omitted).
 
-    deals = sorted(pool, key=_discount_pct, reverse=True)
-    if min_discount_pct is not None:
-        try:
-            floor = float(min_discount_pct)
-            deals = [p for p in deals if _discount_pct(p) >= floor]
-        except (TypeError, ValueError):
-            pass
+    Ranks/filters via get_deals (sql: get_deals_page, one SQL query with the
+    discount floor and LIMIT pushed down; memory: _mem_deals, the same
+    sort/filter over PRODUCTS) rather than fetching the whole catalog into
+    Python and slicing 8 rows out of it here -- get_products_page's
+    sort="deals" already does exactly this ranking for the homepage rail;
+    this used to duplicate that logic AND do it the slow way, dragging the
+    full catalog (description text included) over the wire on every
+    catalog-wide "what's on sale?" chat turn."""
+    requested_category = (category or "").strip() or None
+    category = (requested_category or "").lower().replace(" ", "_").replace("-", "_") or None
+    unmatched_category = None
+    if category is not None:
+        # Gemini passes a category the way the user said it ("wall art"),
+        # not the catalog's underscored slug ("wall_art") -- the replace()
+        # above handles that. If it STILL isn't a real category (a plural/
+        # singular mismatch, a category that doesn't exist in this catalog),
+        # fall back to catalog-wide rather than confidently declining "no
+        # products found" when a category filter typo is the actual issue --
+        # but keep the ORIGINAL request visible in the response so the
+        # narration can say "no wall art deals, but here's what's on sale
+        # catalog-wide" instead of silently dropping the user's intent.
+        if category not in set(get_categories()):
+            unmatched_category = requested_category
+            category = None
+    try:
+        min_discount_pct = float(min_discount_pct) if min_discount_pct is not None else None
+    except (TypeError, ValueError):
+        min_discount_pct = None
 
-    top = deals[:8]
+    top = get_deals(category, min_discount_pct, limit=8)
     if not top:
-        return {"feasible": False, "category": category, "min_discount_pct": min_discount_pct,
-                "reason": "Nothing meets that discount threshold right now."}
-    return {"feasible": True, "category": category, "min_discount_pct": min_discount_pct, "items": top}
+        if min_discount_pct is not None:
+            return {"feasible": False, "category": category, "min_discount_pct": min_discount_pct,
+                    "reason": "Nothing meets that discount threshold right now."}
+        return {"feasible": False, "reason": f"No products found{f' in {category!r}' if category else ''}."}
+    result = {"feasible": True, "category": category, "min_discount_pct": min_discount_pct, "items": top}
+    if unmatched_category:
+        result["requested_category_not_found"] = unmatched_category
+    return result
 
 
 def compare_products(skus):
