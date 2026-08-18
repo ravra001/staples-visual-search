@@ -648,6 +648,40 @@ function renderRoomSamples(mountId) {
   });
 }
 
+// Text-only example prompts for the hero's Staples AI column -- each one is
+// answerable by an existing tool with no prior conversation context needed
+// (unlike find_similar/compare_products, which need a sku already in
+// history), so clicking one always produces a real result, not a
+// clarifying question.
+const HERO_AI_EXAMPLES = [
+  "Set up an office for 8 people under $4,000",
+  "What's on sale right now?",
+  "Plan a living room in navy and gold",
+  "Find me a stapler under $15",
+];
+
+function renderHeroAIExamples(mountId) {
+  const mount = document.getElementById(mountId);
+  if (!mount) return;
+  mount.innerHTML = HERO_AI_EXAMPLES.map(text => `
+    <button class="hero-ai-sample-chip" type="button">${esc(text)}</button>`).join("");
+  mount.querySelectorAll(".hero-ai-sample-chip").forEach(btn => {
+    btn.addEventListener("click", () => startAgentQuickPrompt(btn.textContent));
+  });
+}
+
+// Opens Staples AI and submits one canned prompt through the exact same
+// form-submit path a typed message takes (not a parallel send call), so
+// history/session-persistence/rendering all stay identical to a real send.
+function startAgentQuickPrompt(text) {
+  openAgentModal();
+  const input = document.getElementById("vs-agent-input");
+  const form = document.getElementById("vs-agent-form");
+  if (!input || !form) return;
+  input.value = text;
+  form.requestSubmit();
+}
+
 function wireVisualSearch(buttonId, inputId) {
   const btn = document.getElementById(buttonId);
   const input = document.getElementById(inputId);
