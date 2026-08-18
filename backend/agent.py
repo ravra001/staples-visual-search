@@ -734,9 +734,18 @@ def plan_room_setup(room_type, budget, style=""):
     style_terms = [t for t in re.split(r"[,\s]+", (style or "").strip().lower())
                    if len(t) > 2 and t not in _STYLE_STOPWORDS]
 
+    # Fetched once per category, reused by both the initial pick loop below
+    # AND the upgrade loop further down -- each was independently calling
+    # get_products_by_category for the same category (sofas alone is 1,190
+    # rows under the 10k catalog), doubling the DB round trips a single
+    # plan_room_setup call makes for no reason; a whole-room plan touches
+    # several categories, so this is the difference between ~4 and ~8
+    # queries for a typical 4-category room.
+    items_by_cat = {cat: get_products_by_category(cat, order_by_price=True) for cat in categories}
+
     picks = {}
     for cat in categories:
-        items = get_products_by_category(cat, order_by_price=True)
+        items = items_by_cat[cat]
         if not items:
             continue
         matching = [p for p in items if _style_match(p, style_terms)]
@@ -756,8 +765,7 @@ def plan_room_setup(room_type, budget, style=""):
         del picks[worst_cat]
 
     if not picks:
-        cheapest_per_category = [items[0] for cat in categories
-                                  if (items := get_products_by_category(cat, order_by_price=True))]
+        cheapest_per_category = [items[0] for cat in categories if (items := items_by_cat[cat])]
         cheapest = min(cheapest_per_category, key=lambda p: p["price"], default=None)
         return {
             "feasible": False, "room_type": room_type, "budget": round(budget, 2),
@@ -767,7 +775,7 @@ def plan_room_setup(room_type, budget, style=""):
 
     remaining = budget - sum(p["price"] for p in picks.values())
     for cat in sorted(picks, key=lambda c: _quality_score(picks[c])):
-        items = get_products_by_category(cat, order_by_price=True)
+        items = items_by_cat[cat]
         matching = [p for p in items if _style_match(p, style_terms)]
         pool = matching or items
         current = picks[cat]
