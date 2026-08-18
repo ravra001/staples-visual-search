@@ -584,12 +584,15 @@ against the pre-fix groupings.
 
 ## 15. Staples AI chat agent (Vertex Gemini)
 
-The `/api/agent/chat` endpoint (`backend/agent.py`) is a small tool-calling
-chat agent — Gemini decides when to call `search_products` (delegates to
-the existing hybrid search) or `plan_office_setup` (deterministic Python
-arithmetic over real catalog prices; Gemini never computes the numbers
-itself). It runs in-process in the same Cloud Run service, not a separate
-deployment. Two things this needs that nothing else in this guide sets up:
+The `/api/agent/chat` endpoint (`backend/agent.py`) is a tool-calling chat
+agent — eleven tools (search, office/room planning, Shop the Room, receipt/
+list reading, find-similar, deals, comparisons, bundle swaps — see
+`agent.py`'s module docstring for the full list), every one a thin wrapper
+over deterministic Python/SQL that already exists elsewhere in this app;
+Gemini decides which tool to call and narrates the result, it never
+computes prices or invents matches itself. It runs in-process in the same
+Cloud Run service, not a separate deployment. Two things this needs that
+nothing else in this guide sets up:
 
 ```bash
 # Vertex AI wasn't in the step-2 API list because nothing needed it while
