@@ -18,6 +18,12 @@ truststore>=0.9
 # regardless of which EMBEDDING_BACKEND is active.
 google-cloud-aiplatform>=1.60
 
+# --- Voice input (Staples AI chat's mic button, backend/speech.py) ---
+# Same GCP project/credentials as the above -- a separate Google Cloud API
+# (speech.googleapis.com), not a separate project. Installed unconditionally
+# alongside aiplatform so VOICE_ENABLED works without a second install step.
+google-cloud-speech>=2.26
+
 # --- DATA_BACKEND=sql (Cloud SQL / Postgres, pgvector for vector search) ---
 SQLAlchemy>=2.0
 psycopg[binary]>=3.1

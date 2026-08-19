@@ -836,6 +836,21 @@ a { color: inherit; text-decoration: none; }
 }
 #vs-agent-attach-btn:hover { background: var(--bg-light, #f4f4f4); color: var(--staples-red); border-color: var(--staples-red); }
 #vs-agent-attach-btn svg { width: 16px; height: 16px; }
+#vs-agent-mic-btn {
+  flex: 0 0 auto; width: 36px; height: 36px; padding: 0; border-radius: 50%;
+  background: var(--bg-light, #f4f4f4); color: var(--gray-text); border: 1px solid var(--border);
+  display: flex; align-items: center; justify-content: center;
+}
+#vs-agent-mic-btn:hover { background: var(--bg-light, #f4f4f4); color: var(--staples-red); border-color: var(--staples-red); }
+#vs-agent-mic-btn svg { width: 16px; height: 16px; }
+#vs-agent-mic-btn.recording {
+  background: var(--staples-red); color: #fff; border-color: var(--staples-red);
+  animation: vs-mic-pulse 1.2s ease-in-out infinite;
+}
+@keyframes vs-mic-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(204, 0, 0, 0.4); }
+  50% { box-shadow: 0 0 0 6px rgba(204, 0, 0, 0); }
+}
 .vs-agent-image-preview {
   display: flex; align-items: center; gap: 8px; padding: 8px 14px;
   border-top: 1px solid var(--border);

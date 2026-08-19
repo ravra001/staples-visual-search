@@ -99,6 +99,7 @@ const ICONS = {
   chat: `<svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M4 5h16v11H8l-4 4V5z"/></svg>`,
   cart: `<svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M3 4h2l2.4 12.4a2 2 0 0 0 2 1.6h7.2a2 2 0 0 0 2-1.6L20 8H6"/><circle cx="9.5" cy="20.5" r="1.2"/><circle cx="17" cy="20.5" r="1.2"/></svg>`,
   chevron: `<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2"><polyline points="6 9 12 15 18 9"/></svg>`,
+  mic: `<svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="9" y="2" width="6" height="12" rx="3"/><path d="M5 11a7 7 0 0 0 14 0"/><line x1="12" y1="18" x2="12" y2="22"/><line x1="8" y1="22" x2="16" y2="22"/></svg>`,
 };
 
 const FOOTER_COLUMNS = [
@@ -1593,6 +1594,7 @@ function buildAgentModal() {
       <form id="vs-agent-form" class="vs-agent-form" autocomplete="off">
         <button id="vs-agent-attach-btn" type="button" title="Attach a photo" aria-label="Attach a photo">${ICONS.camera}</button>
         <input id="vs-agent-image-input" type="file" accept="image/*" hidden />
+        <button id="vs-agent-mic-btn" type="button" title="Speak instead of typing" aria-label="Speak instead of typing">${ICONS.mic}</button>
         <input id="vs-agent-input" type="text" placeholder="Ask Staples AI…" />
         <button type="submit">Send</button>
       </form>
@@ -1636,6 +1638,8 @@ function buildAgentModal() {
     modal.querySelector("#vs-agent-image-preview").hidden = true;
   });
 
+  wireAgentMic(modal.querySelector("#vs-agent-mic-btn"), modal.querySelector("#vs-agent-input"));
+
   modal.querySelector("#vs-agent-form").addEventListener("submit", (e) => {
     e.preventDefault();
     const form = e.target;
@@ -1660,6 +1664,75 @@ function openAgentModal() {
   buildAgentModal();
   document.getElementById("vs-agent-modal").hidden = false;
   document.getElementById("vs-agent-input")?.focus();
+}
+
+// Voice input for the Staples AI chat: click to start recording, click
+// again to stop (not push-to-talk -- simpler and more reliable across
+// trackpad/touch than "hold down"). The transcript fills the input box but
+// is NOT auto-sent -- see backend/speech.py's module docstring for why
+// (transcription errors on shopping-specific terms are common enough that
+// a glance before sending is worth the extra click).
+function wireAgentMic(btn, input) {
+  if (!btn || !input) return;
+  if (!navigator.mediaDevices?.getUserMedia || typeof MediaRecorder === "undefined") {
+    btn.hidden = true;   // no silent-failure button on a browser that can't record
+    return;
+  }
+
+  let recorder = null;
+  let chunks = [];
+  let stream = null;
+
+  const stopStream = () => {
+    stream?.getTracks().forEach(t => t.stop());
+    stream = null;
+  };
+
+  btn.addEventListener("click", async () => {
+    if (recorder && recorder.state === "recording") {
+      recorder.stop();   // -> onstop below does the upload
+      return;
+    }
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    } catch (e) {
+      console.error("Mic access failed:", e);
+      alert("Couldn't access the microphone. Check your browser's permission for this site.");
+      return;
+    }
+    chunks = [];
+    recorder = new MediaRecorder(stream);
+    recorder.ondataavailable = (e) => { if (e.data.size > 0) chunks.push(e.data); };
+    recorder.onstop = async () => {
+      stopStream();
+      btn.classList.remove("recording");
+      btn.disabled = true;
+      try {
+        const blob = new Blob(chunks, { type: recorder.mimeType || "audio/webm" });
+        const formData = new FormData();
+        formData.append("file", blob, "voice-query.webm");
+        const res = await fetch(`${API_BASE}/api/agent/transcribe`, { method: "POST", body: formData });
+        if (!res.ok) throw new Error(`transcribe failed (${res.status})`);
+        const data = await res.json();
+        const text = (data.text || "").trim();
+        if (!text) {
+          alert("Didn't catch that — try again, a bit closer to the mic.");
+        } else {
+          // Append rather than overwrite -- lets someone type part of a
+          // query, then speak the rest, without losing what they typed.
+          input.value = input.value.trim() ? `${input.value.trim()} ${text}` : text;
+          input.focus();
+        }
+      } catch (e) {
+        console.error("Voice transcription failed:", e);
+        alert("Couldn't transcribe that — try typing instead.");
+      } finally {
+        btn.disabled = false;
+      }
+    };
+    recorder.start();
+    btn.classList.add("recording");
+  });
 }
 
 function _appendAgentMessage(role, html) {

@@ -104,6 +104,13 @@ AGENT_ENABLED = _bool_val("AGENT_ENABLED", "agent.enabled", True)
 AGENT_MODEL = _val("AGENT_MODEL", "agent.model", "gemini-2.5-flash")
 AGENT_MAX_ITERATIONS = int(_val("AGENT_MAX_ITERATIONS", "agent.max_iterations", 3))
 
+# ---- Voice input (speech-to-text for the chat's mic button) ----
+# Reuses GCP_PROJECT above -- Cloud Speech-to-Text is a separate API
+# (speech.googleapis.com) on the same project/credentials as Vertex, not a
+# new project to configure.
+VOICE_ENABLED = _bool_val("VOICE_ENABLED", "voice.enabled", True)
+VOICE_LANGUAGE = _val("VOICE_LANGUAGE", "voice.language_code", "en-US")
+
 
 def index_fingerprint(catalog_hash=None):
     """Identity of the model (+ fusion config, + optionally the catalog content)

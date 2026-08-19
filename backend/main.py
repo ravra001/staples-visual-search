@@ -26,6 +26,7 @@ from contextlib import asynccontextmanager
 import numpy as np
 import config
 import agent
+import speech
 from text_match import singularize
 from fastapi import FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
@@ -1459,6 +1460,34 @@ async def agent_chat(body: AgentChatRequest):
         reply = (f"Here's what I found for \"{message}\"." if result["count"]
                  else f"I couldn't find anything for \"{message}\" — try different words.")
         return {"reply": reply, "items": result["items"], "bundle": None, "degraded": True}
+
+
+@app.post("/api/agent/transcribe")
+async def agent_transcribe(file: UploadFile = File(...)):
+    """Voice input for the Staples AI chat's mic button. Returns the raw
+    transcript text for the browser to fill into the chat input box (NOT
+    auto-submitted -- see speech.py's module docstring for why). A separate
+    upload endpoint rather than folding into /api/agent/chat's JSON body:
+    the audio clip is discarded immediately after transcription, never
+    becomes part of the conversation history the way an attached image
+    does, so it doesn't belong in that request/response shape."""
+    if not config.VOICE_ENABLED:
+        raise HTTPException(503, "Voice input is disabled")
+    if not file.content_type or not file.content_type.startswith("audio/"):
+        raise HTTPException(400, "Please upload an audio file")
+
+    audio_bytes = await file.read(_MAX_UPLOAD_BYTES + 1)   # bounded read, same limit as image uploads
+    if len(audio_bytes) == 0:
+        raise HTTPException(400, "Empty file")
+    if len(audio_bytes) > _MAX_UPLOAD_BYTES:
+        raise HTTPException(413, f"Recording too large (limit {config.MAX_UPLOAD_MB:g} MB)")
+
+    try:
+        text = await run_in_threadpool(speech.transcribe, audio_bytes, file.content_type)
+    except Exception:
+        print(f"[speech] /api/agent/transcribe failed:\n{traceback.format_exc()}", file=sys.stderr)
+        raise HTTPException(503, "Voice input is unavailable right now — try typing instead.")
+    return {"text": text}
 
 
 # ---------- static assets ----------
