@@ -75,7 +75,22 @@ a { color: inherit; text-decoration: none; }
 }
 
 /* main bar */
-.main-nav { background: #fff; }
+.main-nav { background: var(--staples-red); }
+/* Everything inside the red main nav needs to flip to a light color for
+   contrast -- scoped under .main-nav so the same classes (icon-btn,
+   acct-link, etc.) keep their original dark-on-white styling everywhere
+   ELSE they're used (cart page, product page, ...). */
+.main-nav .logo, .main-nav .logo-dot { color: #fff; }
+.main-nav .menu-wrap .icon-btn { color: #fff; }
+.main-nav .menu-wrap .icon-btn:hover { background: rgba(255, 255, 255, 0.18); color: #fff; }
+.main-nav .location-chip { color: #fff; }
+.main-nav .location-chip:hover { background: rgba(255, 255, 255, 0.18); }
+.main-nav .location-text small { color: rgba(255, 255, 255, 0.8); }
+.main-nav #text-search-form { border-color: transparent; box-shadow: 0 1px 4px rgba(0, 0, 0, 0.18); }
+.main-nav #text-search-form:focus-within { border-color: #fff; }
+.main-nav .account-icons .acct-link { color: #fff; }
+.main-nav .account-icons .acct-link:hover { background: rgba(255, 255, 255, 0.18); color: #fff; }
+.main-nav .cart-badge { background: #fff; color: var(--staples-red); }
 .main-nav-inner {
   max-width: var(--max-w);
   margin: 0 auto;
