@@ -15,10 +15,13 @@ Also home to agent.py's orchestration loop (_do_agent_chat) — the Staples
 AI chat's eleven tools are thin wrappers over the same search/CV pipeline
 defined below, not a separate implementation.
 """
+import asyncio
 import base64
 import os
+import queue as queue_module
 import re
 import sys
+import threading
 import time
 import traceback
 from contextlib import asynccontextmanager
@@ -28,7 +31,7 @@ import config
 import agent
 import speech
 from text_match import singularize
-from fastapi import FastAPI, File, HTTPException, Request, UploadFile
+from fastapi import FastAPI, File, HTTPException, Request, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, RedirectResponse
@@ -1462,32 +1465,63 @@ async def agent_chat(body: AgentChatRequest):
         return {"reply": reply, "items": result["items"], "bundle": None, "degraded": True}
 
 
-@app.post("/api/agent/transcribe")
-async def agent_transcribe(file: UploadFile = File(...)):
-    """Voice input for the Staples AI chat's mic button. Returns the raw
-    transcript text for the browser to fill into the chat input box (NOT
-    auto-submitted -- see speech.py's module docstring for why). A separate
-    upload endpoint rather than folding into /api/agent/chat's JSON body:
-    the audio clip is discarded immediately after transcription, never
-    becomes part of the conversation history the way an attached image
-    does, so it doesn't belong in that request/response shape."""
-    if not config.VOICE_ENABLED:
-        raise HTTPException(503, "Voice input is disabled")
-    if not file.content_type or not file.content_type.startswith("audio/"):
-        raise HTTPException(400, "Please upload an audio file")
+@app.websocket("/ws/agent/transcribe")
+async def agent_transcribe_ws(ws: WebSocket, sample_rate: int = 16000):
+    """Streaming voice input for the Staples AI chat's mic button -- text
+    appears as the user talks, not only after they stop (see speech.py's
+    module docstring for the full reasoning, including why this is raw
+    LINEAR16 PCM rather than whatever MediaRecorder happens to produce).
 
-    audio_bytes = await file.read(_MAX_UPLOAD_BYTES + 1)   # bounded read, same limit as image uploads
-    if len(audio_bytes) == 0:
-        raise HTTPException(400, "Empty file")
-    if len(audio_bytes) > _MAX_UPLOAD_BYTES:
-        raise HTTPException(413, f"Recording too large (limit {config.MAX_UPLOAD_MB:g} MB)")
+    Protocol: client sends binary frames of raw PCM audio as they're
+    captured, then a "STOP" text frame (or just disconnects -- handled the
+    same way) once the user stops recording. Server sends one JSON text
+    frame per partial/final transcript Google returns:
+    {"text": "...", "is_final": bool}, or {"error": "..."} if the
+    underlying Speech-to-Text call fails (e.g. GCP_PROJECT unset locally).
+    sample_rate: the browser's own actual AudioContext sample rate --
+    always correct because it's reported by the browser, never guessed
+    here (see the frontend's wireAgentMic)."""
+    if not config.VOICE_ENABLED:
+        await ws.close(code=1008, reason="Voice input is disabled")
+        return
+    await ws.accept()
+
+    chunk_queue: "queue_module.Queue" = queue_module.Queue()
+    loop = asyncio.get_event_loop()
+
+    def on_result(text, is_final):
+        # Called from the worker thread below, which is NOT the asyncio
+        # event loop thread -- WebSocket.send_json isn't thread-safe, so
+        # hop back onto the loop rather than calling it directly here.
+        asyncio.run_coroutine_threadsafe(ws.send_json({"text": text, "is_final": is_final}), loop)
+
+    def run():
+        try:
+            speech.streaming_transcribe(sample_rate, chunk_queue, on_result)
+        except Exception:
+            asyncio.run_coroutine_threadsafe(
+                ws.send_json({"error": "Voice input is unavailable right now — try typing instead."}), loop)
+
+    worker = threading.Thread(target=run, daemon=True)
+    worker.start()
 
     try:
-        text = await run_in_threadpool(speech.transcribe, audio_bytes, file.content_type)
-    except Exception:
-        print(f"[speech] /api/agent/transcribe failed:\n{traceback.format_exc()}", file=sys.stderr)
-        raise HTTPException(503, "Voice input is unavailable right now — try typing instead.")
-    return {"text": text}
+        while True:
+            message = await ws.receive()
+            if message["type"] == "websocket.disconnect":
+                break
+            if message.get("bytes") is not None:
+                chunk_queue.put(message["bytes"])
+            elif message.get("text") == "STOP":
+                break
+    except WebSocketDisconnect:
+        pass
+    finally:
+        chunk_queue.put(speech._END_OF_STREAM)
+        # Bounded wait so a stuck/slow Speech-to-Text call can't hang this
+        # handler (and the worker thread) forever -- the thread is a daemon,
+        # so worst case it's abandoned, not leaked as a zombie process.
+        await run_in_threadpool(worker.join, 10)
 
 
 # ---------- static assets ----------

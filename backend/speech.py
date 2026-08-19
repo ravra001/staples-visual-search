@@ -1,5 +1,5 @@
 """
-Voice input — speech-to-text for the Staples AI chat's mic button.
+Voice input — streaming speech-to-text for the Staples AI chat's mic button.
 
 Google Cloud Speech-to-Text (speech.googleapis.com), same GCP project and
 credentials as Vertex AI (agent.py's Gemini calls, embeddings.py's vertex
@@ -11,12 +11,25 @@ per-call cost and network dependency are much less consequential, and Cloud
 Speech-to-Text's accuracy on real speech is a genuine step up over a small
 locally-bundled model for a live demo.
 
-Text stops here: the transcript is handed back to the browser to fill the
-existing chat input box, NOT auto-submitted -- transcription errors on
-shopping-specific terms (SKUs, brand names) are common enough that a quick
-glance before sending is worth the extra click.
+STREAMING, not one-shot: text appears as the user talks (interim results),
+not only after they stop -- see main.py's /ws/agent/transcribe. Text stops
+here either way: transcripts fill the existing chat input box, NOT
+auto-submitted -- transcription errors on shopping-specific terms (SKUs,
+brand names) are common enough that a quick glance before sending is worth
+the extra click.
+
+AUDIO FORMAT: raw LINEAR16 PCM, not whatever container/codec
+MediaRecorder happens to produce. MediaRecorder's actual output format is
+browser-dependent (Chrome/Firefox default to webm/opus, Safari to mp4/aac,
+and Safari's webm support for MediaRecorder is unreliable even where it
+exists) -- picking one and hoping is exactly the kind of "works on my
+browser" bug this app has avoided elsewhere. The frontend instead captures
+raw samples via the Web Audio API (AudioContext + AudioWorklet, universally
+supported), converts to 16-bit PCM client-side, and reports its own actual
+sample rate over the WebSocket -- so this module never has to guess a
+codec or a rate; it's told both, always correctly, regardless of browser.
 """
-import io
+import queue
 import sys
 import threading
 import traceback
@@ -37,6 +50,10 @@ except Exception:
 
 _speech_state = {}
 _speech_load_lock = threading.Lock()
+
+# Sentinel pushed onto a chunk queue to signal "no more audio is coming" --
+# distinct from an empty bytes chunk, which is a legal (if useless) frame.
+_END_OF_STREAM = object()
 
 
 def _get_speech_client():
@@ -65,38 +82,58 @@ def _get_speech_client():
         return _speech_state
 
 
-def transcribe(audio_bytes: bytes, mime_type: str = "") -> str:
-    """One recorded clip -> best transcript, or "" if nothing recognizable
-    was said. Cloud Speech-to-Text's synchronous recognize() call is used
-    (not streaming) -- a mic-button clip from the browser is a few seconds
-    at most, well under the ~1 minute sync-call limit, so the extra
-    complexity of a streaming session buys nothing here.
-
-    ENCODING IS NOT SPECIFIED: the browser's MediaRecorder typically
-    produces webm/opus (Chrome/Edge) -- Cloud Speech-to-Text auto-detects
-    the container/codec from the audio bytes themselves when encoding is
-    left unset, which is more robust than hardcoding one and having a
-    different browser's actual output silently mismatch it."""
-    state = _get_speech_client()
-    client, speech = state["client"], state["speech"]
-
-    audio = speech.RecognitionAudio(content=audio_bytes)
-    rec_config = speech.RecognitionConfig(
+def _request_generator(speech_mod, sample_rate_hertz: int, chunk_queue: "queue.Queue"):
+    """First yielded request carries the streaming config (required by the
+    API to be the very first message on the stream); every request after
+    that carries one audio chunk. Blocks on chunk_queue.get() between
+    chunks -- this generator runs the underlying gRPC streaming call's pace,
+    so blocking here is exactly "wait for the next bit of audio to arrive
+    from the browser," not a busy-loop."""
+    rec_config = speech_mod.RecognitionConfig(
+        encoding=speech_mod.RecognitionConfig.AudioEncoding.LINEAR16,
+        sample_rate_hertz=sample_rate_hertz,
         language_code=config.VOICE_LANGUAGE,
-        # Shopping queries are short, spoken sentences, not phone-call audio
-        # or dictation -- this model is tuned for that, per Google's docs.
-        model="command_and_search",
+        model="command_and_search",   # short spoken queries, not dictation/phone-call audio
         enable_automatic_punctuation=False,
     )
-    try:
-        response = client.recognize(config=rec_config, audio=audio)
-    except Exception:
-        print(f"[speech] transcribe failed:\n{traceback.format_exc()}", file=sys.stderr)
-        raise
+    streaming_config = speech_mod.StreamingRecognitionConfig(
+        config=rec_config,
+        interim_results=True,   # the whole point -- partial text before the user stops talking
+    )
+    yield speech_mod.StreamingRecognizeRequest(streaming_config=streaming_config)
+    while True:
+        chunk = chunk_queue.get()
+        if chunk is _END_OF_STREAM:
+            return
+        yield speech_mod.StreamingRecognizeRequest(audio_content=chunk)
 
-    if not response.results:
-        return ""
-    # Each result is one detected utterance; alternatives[0] is the top
-    # guess. Join in case the clip contained a pause splitting it into more
-    # than one result -- rare for a short mic-button clip, but cheap to handle.
-    return " ".join(r.alternatives[0].transcript.strip() for r in response.results if r.alternatives).strip()
+
+def streaming_transcribe(sample_rate_hertz: int, chunk_queue: "queue.Queue", on_result):
+    """Runs Cloud Speech-to-Text's bidirectional streaming call to completion.
+    BLOCKING and synchronous (the underlying gRPC client is) -- callers on
+    an asyncio event loop (main.py's WebSocket handler) must run this in a
+    worker thread, not await it directly.
+
+    chunk_queue: caller pushes raw LINEAR16 PCM bytes onto this as they
+        arrive from the browser, and _END_OF_STREAM exactly once when the
+        client stops recording (or disconnects) -- this function returns
+        once that sentinel has been consumed and Google's stream closes.
+    on_result(text, is_final): called for every partial/final transcript
+        Google returns, in real time as they arrive -- NOT batched until
+        the end. The caller (main.py) is expected to push each call
+        straight out over the WebSocket to the browser.
+    """
+    state = _get_speech_client()
+    client, speech_mod = state["client"], state["speech"]
+
+    requests = _request_generator(speech_mod, sample_rate_hertz, chunk_queue)
+    try:
+        responses = client.streaming_recognize(requests=requests)
+        for response in responses:
+            for result in response.results:
+                if not result.alternatives:
+                    continue
+                on_result(result.alternatives[0].transcript.strip(), result.is_final)
+    except Exception:
+        print(f"[speech] streaming_transcribe failed:\n{traceback.format_exc()}", file=sys.stderr)
+        raise

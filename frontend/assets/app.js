@@ -1668,31 +1668,61 @@ function openAgentModal() {
 
 // Voice input for the Staples AI chat: click to start recording, click
 // again to stop (not push-to-talk -- simpler and more reliable across
-// trackpad/touch than "hold down"). The transcript fills the input box but
-// is NOT auto-sent -- see backend/speech.py's module docstring for why
-// (transcription errors on shopping-specific terms are common enough that
-// a glance before sending is worth the extra click).
+// trackpad/touch than "hold down"). STREAMING -- text appears in the input
+// box live as the user talks, not only after they stop, via a WebSocket to
+// backend/speech.py's streaming_transcribe. Never auto-sent, even once
+// finalized -- see that module's docstring for why (transcription errors
+// on shopping-specific terms are common enough that a glance before
+// sending is worth the extra click).
+//
+// Raw PCM via Web Audio API + AudioWorklet, NOT MediaRecorder -- deliberate.
+// MediaRecorder's actual output container/codec is browser-dependent
+// (Chrome/Firefox default to webm/opus, Safari to mp4/aac, and Safari's
+// webm support is unreliable even where it exists), which would mean the
+// backend has to guess or special-case a format per browser. AudioWorklet
+// is universally supported and lets this capture+convert to a single,
+// unambiguous format (16-bit PCM) client-side, with the browser's own real
+// sample rate reported to the backend -- no guessing anywhere in the chain.
 function wireAgentMic(btn, input) {
   if (!btn || !input) return;
-  if (!navigator.mediaDevices?.getUserMedia || typeof MediaRecorder === "undefined") {
-    btn.hidden = true;   // no silent-failure button on a browser that can't record
+  if (!navigator.mediaDevices?.getUserMedia || typeof AudioWorkletNode === "undefined") {
+    btn.hidden = true;   // no silent-failure button on a browser that can't do this
     return;
   }
 
-  let recorder = null;
-  let chunks = [];
+  let audioContext = null;
   let stream = null;
+  let sourceNode = null;
+  let workletNode = null;
+  let silentGain = null;
+  let ws = null;
+  let recording = false;
+  let baseText = "";    // whatever was already typed before this recording started
+  let finalText = "";   // transcript segments Google has finalized so far, this recording
 
-  const stopStream = () => {
+  // Tears down audio resources. Called once the WebSocket actually closes
+  // (not immediately on click-to-stop) so the "STOP" message has a chance
+  // to reach the server before the mic stream is torn out from under it.
+  const cleanup = () => {
+    workletNode?.port.close();
+    workletNode?.disconnect();
+    sourceNode?.disconnect();
+    silentGain?.disconnect();
+    if (audioContext && audioContext.state !== "closed") audioContext.close();
     stream?.getTracks().forEach(t => t.stop());
-    stream = null;
+    audioContext = stream = sourceNode = workletNode = silentGain = ws = null;
+  };
+
+  const stopRecording = () => {
+    recording = false;
+    btn.classList.remove("recording");
+    if (ws && ws.readyState === WebSocket.OPEN) ws.send("STOP");
+    else cleanup();   // never connected, or already gone -- nothing will call cleanup for us
   };
 
   btn.addEventListener("click", async () => {
-    if (recorder && recorder.state === "recording") {
-      recorder.stop();   // -> onstop below does the upload
-      return;
-    }
+    if (recording) { stopRecording(); return; }
+
     try {
       stream = await navigator.mediaDevices.getUserMedia({ audio: true });
     } catch (e) {
@@ -1700,38 +1730,73 @@ function wireAgentMic(btn, input) {
       alert("Couldn't access the microphone. Check your browser's permission for this site.");
       return;
     }
-    chunks = [];
-    recorder = new MediaRecorder(stream);
-    recorder.ondataavailable = (e) => { if (e.data.size > 0) chunks.push(e.data); };
-    recorder.onstop = async () => {
-      stopStream();
-      btn.classList.remove("recording");
-      btn.disabled = true;
-      try {
-        const blob = new Blob(chunks, { type: recorder.mimeType || "audio/webm" });
-        const formData = new FormData();
-        formData.append("file", blob, "voice-query.webm");
-        const res = await fetch(`${API_BASE}/api/agent/transcribe`, { method: "POST", body: formData });
-        if (!res.ok) throw new Error(`transcribe failed (${res.status})`);
-        const data = await res.json();
-        const text = (data.text || "").trim();
-        if (!text) {
-          alert("Didn't catch that — try again, a bit closer to the mic.");
-        } else {
-          // Append rather than overwrite -- lets someone type part of a
-          // query, then speak the rest, without losing what they typed.
-          input.value = input.value.trim() ? `${input.value.trim()} ${text}` : text;
-          input.focus();
-        }
-      } catch (e) {
-        console.error("Voice transcription failed:", e);
-        alert("Couldn't transcribe that — try typing instead.");
-      } finally {
-        btn.disabled = false;
-      }
+
+    audioContext = new AudioContext();
+    try {
+      await audioContext.audioWorklet.addModule("/assets/pcm-worklet.js");
+    } catch (e) {
+      console.error("Voice input setup failed:", e);
+      alert("Couldn't set up voice input in this browser — try typing instead.");
+      stream.getTracks().forEach(t => t.stop());
+      audioContext.close();
+      audioContext = stream = null;
+      return;
+    }
+
+    const wsProto = location.protocol === "https:" ? "wss:" : "ws:";
+    const sampleRate = Math.round(audioContext.sampleRate);
+    ws = new WebSocket(`${wsProto}//${location.host}/ws/agent/transcribe?sample_rate=${sampleRate}`);
+    baseText = input.value.trim();
+    finalText = "";
+
+    ws.onopen = () => {
+      sourceNode = audioContext.createMediaStreamSource(stream);
+      workletNode = new AudioWorkletNode(audioContext, "pcm-processor");
+      workletNode.port.onmessage = (event) => {
+        if (ws && ws.readyState === WebSocket.OPEN) ws.send(event.data);
+      };
+      sourceNode.connect(workletNode);
+      // A worklet with no output connection can stop being processed in
+      // some browsers -- route through a silent (gain=0) node to
+      // destination to keep it alive without the mic audibly echoing back
+      // out of the speakers.
+      silentGain = audioContext.createGain();
+      silentGain.gain.value = 0;
+      workletNode.connect(silentGain).connect(audioContext.destination);
+
+      recording = true;
+      btn.classList.add("recording");
     };
-    recorder.start();
-    btn.classList.add("recording");
+
+    ws.onmessage = (event) => {
+      let data;
+      try { data = JSON.parse(event.data); } catch { return; }
+      if (data.error) {
+        console.error("Voice transcription error:", data.error);
+        alert(data.error);
+        stopRecording();
+        return;
+      }
+      const text = (data.text || "").trim();
+      if (data.is_final) {
+        if (text) finalText = finalText ? `${finalText} ${text}` : text;
+      }
+      // Live preview: everything finalized so far, plus whatever's being
+      // said right now but not yet locked in -- this is what actually
+      // makes text appear as the user talks, not in one jump at the end.
+      const interim = data.is_final ? "" : text;
+      input.value = [baseText, finalText, interim].filter(Boolean).join(" ");
+    };
+
+    ws.onerror = (e) => {
+      console.error("Voice WebSocket error:", e);
+    };
+    ws.onclose = () => {
+      recording = false;
+      btn.classList.remove("recording");
+      cleanup();
+      input.focus();
+    };
   });
 }
 
