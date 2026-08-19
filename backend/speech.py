@@ -82,13 +82,7 @@ def _get_speech_client():
         return _speech_state
 
 
-def _request_generator(speech_mod, sample_rate_hertz: int, chunk_queue: "queue.Queue"):
-    """First yielded request carries the streaming config (required by the
-    API to be the very first message on the stream); every request after
-    that carries one audio chunk. Blocks on chunk_queue.get() between
-    chunks -- this generator runs the underlying gRPC streaming call's pace,
-    so blocking here is exactly "wait for the next bit of audio to arrive
-    from the browser," not a busy-loop."""
+def _streaming_config(speech_mod, sample_rate_hertz: int):
     rec_config = speech_mod.RecognitionConfig(
         encoding=speech_mod.RecognitionConfig.AudioEncoding.LINEAR16,
         sample_rate_hertz=sample_rate_hertz,
@@ -96,11 +90,24 @@ def _request_generator(speech_mod, sample_rate_hertz: int, chunk_queue: "queue.Q
         model="command_and_search",   # short spoken queries, not dictation/phone-call audio
         enable_automatic_punctuation=False,
     )
-    streaming_config = speech_mod.StreamingRecognitionConfig(
+    return speech_mod.StreamingRecognitionConfig(
         config=rec_config,
         interim_results=True,   # the whole point -- partial text before the user stops talking
     )
-    yield speech_mod.StreamingRecognizeRequest(streaming_config=streaming_config)
+
+
+def _audio_request_generator(speech_mod, chunk_queue: "queue.Queue"):
+    """Yields ONLY audio-chunk requests -- the installed google-cloud-speech
+    client's streaming_recognize(config, requests) takes the
+    StreamingRecognitionConfig as ITS OWN separate argument (verified from
+    the live error: "streaming_recognize() missing 1 required positional
+    argument: 'config'" -- the raw-gRPC pattern of embedding the config as
+    the first item in the requests iterable, which an OLDER client version
+    or the lower-level transport API uses, is NOT what this installed
+    version's public helper expects). Blocks on chunk_queue.get() between
+    chunks -- this generator runs at the streaming call's own pace, so
+    blocking here is exactly "wait for the next bit of audio to arrive
+    from the browser," not a busy-loop."""
     while True:
         chunk = chunk_queue.get()
         if chunk is _END_OF_STREAM:
@@ -126,9 +133,10 @@ def streaming_transcribe(sample_rate_hertz: int, chunk_queue: "queue.Queue", on_
     state = _get_speech_client()
     client, speech_mod = state["client"], state["speech"]
 
-    requests = _request_generator(speech_mod, sample_rate_hertz, chunk_queue)
+    streaming_config = _streaming_config(speech_mod, sample_rate_hertz)
+    requests = _audio_request_generator(speech_mod, chunk_queue)
     try:
-        responses = client.streaming_recognize(requests=requests)
+        responses = client.streaming_recognize(config=streaming_config, requests=requests)
         for response in responses:
             for result in response.results:
                 if not result.alternatives:
