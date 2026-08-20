@@ -1465,6 +1465,10 @@ async def agent_chat(body: AgentChatRequest):
         return {"reply": reply, "items": result["items"], "bundle": None, "degraded": True}
 
 
+# NOTE: a GCP billing hold on this project temporarily disabled several
+# APIs (including cloudbuild.googleapis.com), which briefly made the whole
+# service 503 independent of anything below -- unrelated to voice input
+# itself, just recorded here since it looked like an app bug at first.
 @app.websocket("/ws/agent/transcribe")
 async def agent_transcribe_ws(ws: WebSocket, sample_rate: int = 16000):
     """Streaming voice input for the Staples AI chat's mic button -- text
