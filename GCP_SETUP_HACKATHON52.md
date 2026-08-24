@@ -29,101 +29,150 @@ This file is split into two parts:
 
 ## Part A — Run it locally against this project, right now
 
-No blocked permissions needed for any of this.
+No blocked permissions needed for any of this. **Service account key
+creation is blocked by an org policy** (confirmed: "organisation has
+blocked" error) — don't bother with A1 as originally written below if you
+hit that; skip straight to the ADC approach, which uses your own identity
+instead (already has `roles/aiplatform.admin` via the
+`gcp-sds-hackathon@staples.com` group).
 
-### A1. Get the service account key
+Steps 1-3 run in **Cloud Shell**; steps 4-9 run on the **machine that will
+actually run the app** (your laptop, a VM — wherever `python run.py` will
+execute). If that's the same machine you're doing Cloud Shell from, steps
+1-3 and 4-9 are just sequential; if it's a different machine (e.g. Cloud
+Shell for the browser-auth step, a separate box to actually run the app),
+you need to carry one file across in between.
 
-Per the hackathon's own instructions: Console → **IAM & Admin → Service
-Accounts** → find
-`sa-np-hackathon52-000@prj-spls-np-hackathon52-000.iam.gserviceaccount.com`
-→ **Keys** tab → **Add key** → **Create new key** → JSON. This downloads a
-`.json` file — treat it like a password (it's a real credential for this
-project's service account); don't commit it to the repo or share it.
+### 🖥️ Cloud Shell
 
-### A2. Point the app at it
-
-From the repo's `backend/` directory:
+**A1. Generate your own ADC credentials** (browser OAuth, using your
+identity — not a service account key):
 
 ```bash
-export GOOGLE_APPLICATION_CREDENTIALS="/path/to/the-downloaded-key.json"
+gcloud auth application-default login
+```
+
+**A2. Read out the credential file it created:**
+
+```bash
+cat ~/.config/gcloud/application_default_credentials.json
+```
+
+Copy that JSON output — you'll save it as a file on the machine that runs
+the app (call it `adc.json`; **treat it like a password**, don't commit it
+or share it).
+
+**A3. (Optional) Sanity-check auth works, before touching the app at
+all:**
+
+```bash
+curl -s -X POST \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $(gcloud auth application-default print-access-token)" \
+  "https://aiplatform.googleapis.com/v1/projects/prj-spls-np-hackathon52-000/locations/us-east4/publishers/google/models/gemini-2.5-flash:generateContent" \
+  -d '{"contents": [{"role": "user", "parts": [{"text": "tell me a joke"}]}], "generationConfig": {"responseModalities": ["TEXT"], "temperature": 0.2, "maxOutputTokens": 1024, "topP": 0.8}}'
+```
+
+If this returns a real joke, your credentials are confirmed good —
+everything after this is app plumbing, not auth. (Note: this specific
+command still works fine with `gcloud auth print-access-token` too, since
+it's your own login either way — `application-default print-access-token`
+just guarantees it's the SAME credential the app's client libraries will
+pick up via `GOOGLE_APPLICATION_CREDENTIALS`/ADC discovery.)
+
+### 💻 Local machine (wherever the app actually runs)
+
+**A4. Save the copied JSON as a file and set environment variables:**
+
+```bash
+# paste the JSON from A2 into adc.json first, then:
+export GOOGLE_APPLICATION_CREDENTIALS="/path/to/adc.json"
 export GCP_PROJECT="prj-spls-np-hackathon52-000"
 export GCP_LOCATION="us-east4"
 ```
 
-`GOOGLE_APPLICATION_CREDENTIALS` is the standard variable every Google
-client library checks automatically (`google-cloud-aiplatform`,
-`google-cloud-speech` — both already used in this app) — this replaces
-the interactive `gcloud auth application-default login` step the app's
-other docs (`RUN_10K.md`) describe; no code changes needed either way.
+**A5. Get the app code onto this machine**, if it isn't already there:
 
-### A3. Enable the APIs this project needs (if not already)
+```bash
+git clone https://github.com/ravra001/staples-visual-search.git
+cd staples-visual-search
+```
 
-You likely already have `serviceusage.serviceUsageAdmin` via the group
-(this worked earlier), so this should succeed:
+**A6. Install dependencies:**
+
+```bash
+pip install -r requirements.txt -r requirements-ml.txt
+```
+
+**A7. Enable the two APIs this needs** (only if not already enabled —
+your account has `serviceusage.serviceUsageAdmin` via the group, so this
+should succeed even though Cloud Run/SQL/Artifact Registry don't):
 
 ```bash
 gcloud config set project prj-spls-np-hackathon52-000
 gcloud services enable aiplatform.googleapis.com speech.googleapis.com
 ```
 
-If `speech.googleapis.com` fails to enable or the service account lacks
-the `roles/speech.editor` role once you test voice, that's a role binding
-someone with IAM admin on this project (the group, or the owner) needs to
-grant to `sa-np-hackathon52-000` — you likely can't self-grant it (IAM
-policy changes weren't in the group's role list either).
-
-### A4. Run the app
+**A8. Run the app:**
 
 ```bash
 cd backend
-uv run python run.py
+python run.py
 ```
 
-(or `python run.py` in an activated venv — see `RUN_10K.md` for the full
-local-run instructions if this is a fresh checkout). Open
-`http://localhost:8000`, open Staples AI, and confirm it gives a real
-Gemini reply instead of a degraded/generic one. Same for the mic — that
-confirms both `aiplatform.user` and (once granted) `speech.editor` are
-working for `sa-np-hackathon52-000`.
-
-**Test the Vertex AI connection directly first**, if you want to isolate
-"is auth actually working" from "is the app wired up right":
-
-```bash
-curl -X POST \
-  -H "Content-Type: application/json" \
-  -H "Authorization: Bearer $(gcloud auth print-access-token)" \
-  "https://aiplatform.googleapis.com/v1/projects/prj-spls-np-hackathon52-000/locations/us-east4/publishers/google/models/gemini-2.5-flash:generateContent" \
-  -d '{"contents": [{"role": "user", "parts": [{"text": "tell me a joke"}]}], "generationConfig": {"responseModalities": ["TEXT"], "temperature": 0.2, "maxOutputTokens": 1024, "topP": 0.8}}'
-```
-
-(This uses your own user credentials via `gcloud auth print-access-token`,
-not the service account key — the hackathon doc's example, useful as a
-sanity check independent of the JSON key working.)
+**A9. Open `http://localhost:8000`** and test it: open Staples AI, send a
+real message. A genuine Gemini-generated reply (not the generic "showing
+plain search results" degraded message) confirms everything above worked
+end to end. Test the mic too — if chat works but voice doesn't, that's
+specifically the `roles/speech.editor` role, which may still need
+granting to your account or `sa-np-hackathon52-000` by someone with IAM
+admin (see Part B's role-request list — worth folding that ask in too,
+even if the rest of Part B stays on hold).
 
 ---
 
 ## Part B — Full Cloud Run deployment (ON HOLD — confirm with admin first)
 
-Everything below is the original from-scratch plan. **Do not start this
-until you've confirmed two things with whoever administers this
-project**:
+Everything below is the original from-scratch plan. **Confirmed blocked
+by three separate, independently-tested permission denials** — not a
+guess:
 
-1. Is Cloud Run + Cloud SQL actually the intended deployment path for
-   this hackathon, or is there different infrastructure already set up
-   that you should be pointed at instead?
-2. If yes, request these roles (either for your own account, or
-   confirmation that `sa-np-hackathon52-000` will be used and who can
-   bind roles to it):
-   - `roles/run.admin` (deploy/manage Cloud Run services)
-   - `roles/cloudsql.admin` (create the Postgres instance)
-   - `roles/artifactregistry.admin` (create the image repo)
-   - `roles/iam.serviceAccountUser` on `sa-np-hackathon52-000` specifically
-     (needed to deploy Cloud Run *as* that account, without needing to
-     create a new one) — this is likely the smoother ask than requesting
-     `iam.serviceAccountAdmin` outright, since it doesn't grant broad
-     account-creation rights, just "let me deploy things that run as this
-     one already-existing account."
+1. `gcloud iam service-accounts create` → `Permission
+   iam.serviceAccounts.create denied`
+2. `gcloud artifacts repositories create` → same class of denial
+3. `gcloud projects add-iam-policy-binding` (attempting to self-grant
+   `roles/run.admin`) → same class of denial
+
+All three are consistent with the IAM policy dump: your access (via
+`gcp-sds-hackathon@staples.com`) covers AI/data APIs only. There is no
+further gcloud-CLI workaround worth trying — this needs an admin action.
+
+**Send this to whoever administers the project**
+(`adminleige001@staples.com` holds `roles/owner`):
+
+> Subject: GCP role requests for `prj-spls-np-hackathon52-000`
+>
+> Hi — working on our hackathon project on `prj-spls-np-hackathon52-000`
+> and hit a permissions wall trying to deploy. Could you (or whoever
+> manages IAM on this project) grant the following?
+>
+> 1. **`roles/run.admin`** — to deploy/manage a Cloud Run service
+> 2. **`roles/artifactregistry.admin`** (or `roles/artifactregistry.repoAdmin`
+>    if you'd rather scope it narrower) — to create a Docker image repository
+> 3. **`roles/cloudsql.admin`** (or `roles/cloudsql.editor`) — to
+>    provision a Cloud SQL Postgres instance
+> 4. **`roles/iam.serviceAccountUser`** on the existing service account
+>    `sa-np-hackathon52-000@prj-spls-np-hackathon52-000.iam.gserviceaccount.com`
+>    specifically — so I can deploy Cloud Run *as* that account without
+>    needing to create a new one
+> 5. **`roles/speech.editor`** on that same service account — for the
+>    Speech-to-Text API (voice input feature)
+>
+> Can grant to my account directly, or to the
+> `gcp-sds-hackathon@staples.com` group if that's easier to manage. Also
+> wanted to confirm: is Cloud Run + Cloud SQL actually the expected
+> deployment path for this hackathon, or is there different
+> infrastructure already set up that I should be using instead?
 
 Once that's confirmed, here's the plan, using the **existing**
 `sa-np-hackathon52-000` service account (not creating a new one) and the
@@ -373,10 +422,18 @@ file's step 13 when you get to it.
 
 ## Quick reference: what went wrong last time (so you recognize it faster)
 
-- **`Permission iam.serviceAccounts.create denied`** — your account has no
-  IAM-admin role on this project; the fix isn't a gcloud flag, it's asking
-  the project owner to grant a role (or use the existing service account
-  instead, per Part A/B above).
+- **`Permission iam.serviceAccounts.create denied`** (or the same class of
+  denial from `artifacts repositories create` or
+  `add-iam-policy-binding`) — your account has no IAM-admin/Run/SQL/
+  Artifact-Registry role on this project; confirmed by testing all three
+  independently. The fix isn't a gcloud flag or a different command to
+  try — it's the admin request in Part B. Don't keep probing for a
+  workaround; there isn't one at this permission level.
+- **Service account key creation blocked ("organisation has blocked")** —
+  an org policy (`iam.disableServiceAccountKeyCreation` or similar), not
+  an IAM role gap. Use `gcloud auth application-default login` instead
+  (Part A) — authenticates as *you*, not a service account, and isn't
+  subject to the same policy.
 - **Generic `503` / "service not available, try again in 30 seconds"** —
   on the previous project, this traced back to a billing hold silently
   disabling APIs (including Cloud Build itself), independent of any app
