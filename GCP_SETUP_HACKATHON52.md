@@ -1,64 +1,161 @@
 # GCP onboarding — prj-spls-np-hackathon52-000
 
-A copy-paste, run-in-order runbook for standing this app up on the
-hackathon-provided project, from scratch. Every variable below is already
-filled in with this project's real values — nothing to substitute. Run
-everything in **Cloud Shell** (browser-based, already authenticated) — do
-NOT try this from a local machine's `gcloud` (see `GCP_SETUP.md`'s "Why
-Cloud Shell, not local gcloud" section for why).
+Updated after actually trying this against the real project: your account
+(via the `gcp-sds-hackathon@staples.com` group) has admin rights on the
+*AI/data* APIs (Vertex AI, Vision AI, Secret Manager, Storage, Dataform)
+but **no permission to create service accounts, deploy Cloud Run, or
+provision Cloud SQL/Artifact Registry**. The hackathon's own onboarding
+doc confirms the intended pattern is different from a from-scratch Cloud
+Run deployment: call Vertex AI directly, authenticated either as yourself
+or via a pre-existing service account's downloaded JSON key
+(`sa-np-hackathon52-000@prj-spls-np-hackathon52-000.iam.gserviceaccount.com`).
+Also: **Vertex AI/Gemini for this project is in `us-east4`**, not
+`us-central1`.
 
-This is a trimmed, pre-filled version of the full `GCP_SETUP.md` runbook,
-folding in everything that actually went wrong setting this app up the
-first time on a different project — a dedicated service account from the
-very start (not the default compute one), every API enabled up front
-(including Speech-to-Text and Vertex AI, easy to forget until voice/chat
-breaks later), and the two gotchas that cost real debugging time: the
-Cloud Build trigger's "Autodetected" trap, and a billing hold silently
-disabling APIs (including Cloud Build itself) independent of any app bug.
+This file is split into two parts:
 
-If you get stuck, `GCP_SETUP.md`'s "Troubleshooting" section has the full
-story (with exact error text) for most of what can go wrong here.
+- **Part A** works right now, with the permissions you already have — get
+  Staples AI (Gemini) and voice input running **locally** against this
+  project.
+- **Part B** is the full Cloud Run + Cloud SQL deployment from the
+  original plan — **on hold** until you confirm with the project admin
+  (`adminleige001@staples.com` holds `roles/owner`) whether that's even
+  the intended path for this hackathon, and if so, get the missing roles
+  granted (`run.admin`, a Cloud SQL admin role, an Artifact Registry admin
+  role, and either `iam.serviceAccountAdmin` or explicit permission to act
+  as the existing `sa-np-hackathon52-000` service account).
 
 ---
 
-## 0. One-time setup — open Cloud Shell and paste this whole block
+## Part A — Run it locally against this project, right now
+
+No blocked permissions needed for any of this.
+
+### A1. Get the service account key
+
+Per the hackathon's own instructions: Console → **IAM & Admin → Service
+Accounts** → find
+`sa-np-hackathon52-000@prj-spls-np-hackathon52-000.iam.gserviceaccount.com`
+→ **Keys** tab → **Add key** → **Create new key** → JSON. This downloads a
+`.json` file — treat it like a password (it's a real credential for this
+project's service account); don't commit it to the repo or share it.
+
+### A2. Point the app at it
+
+From the repo's `backend/` directory:
+
+```bash
+export GOOGLE_APPLICATION_CREDENTIALS="/path/to/the-downloaded-key.json"
+export GCP_PROJECT="prj-spls-np-hackathon52-000"
+export GCP_LOCATION="us-east4"
+```
+
+`GOOGLE_APPLICATION_CREDENTIALS` is the standard variable every Google
+client library checks automatically (`google-cloud-aiplatform`,
+`google-cloud-speech` — both already used in this app) — this replaces
+the interactive `gcloud auth application-default login` step the app's
+other docs (`RUN_10K.md`) describe; no code changes needed either way.
+
+### A3. Enable the APIs this project needs (if not already)
+
+You likely already have `serviceusage.serviceUsageAdmin` via the group
+(this worked earlier), so this should succeed:
+
+```bash
+gcloud config set project prj-spls-np-hackathon52-000
+gcloud services enable aiplatform.googleapis.com speech.googleapis.com
+```
+
+If `speech.googleapis.com` fails to enable or the service account lacks
+the `roles/speech.editor` role once you test voice, that's a role binding
+someone with IAM admin on this project (the group, or the owner) needs to
+grant to `sa-np-hackathon52-000` — you likely can't self-grant it (IAM
+policy changes weren't in the group's role list either).
+
+### A4. Run the app
+
+```bash
+cd backend
+uv run python run.py
+```
+
+(or `python run.py` in an activated venv — see `RUN_10K.md` for the full
+local-run instructions if this is a fresh checkout). Open
+`http://localhost:8000`, open Staples AI, and confirm it gives a real
+Gemini reply instead of a degraded/generic one. Same for the mic — that
+confirms both `aiplatform.user` and (once granted) `speech.editor` are
+working for `sa-np-hackathon52-000`.
+
+**Test the Vertex AI connection directly first**, if you want to isolate
+"is auth actually working" from "is the app wired up right":
+
+```bash
+curl -X POST \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $(gcloud auth print-access-token)" \
+  "https://aiplatform.googleapis.com/v1/projects/prj-spls-np-hackathon52-000/locations/us-east4/publishers/google/models/gemini-2.5-flash:generateContent" \
+  -d '{"contents": [{"role": "user", "parts": [{"text": "tell me a joke"}]}], "generationConfig": {"responseModalities": ["TEXT"], "temperature": 0.2, "maxOutputTokens": 1024, "topP": 0.8}}'
+```
+
+(This uses your own user credentials via `gcloud auth print-access-token`,
+not the service account key — the hackathon doc's example, useful as a
+sanity check independent of the JSON key working.)
+
+---
+
+## Part B — Full Cloud Run deployment (ON HOLD — confirm with admin first)
+
+Everything below is the original from-scratch plan. **Do not start this
+until you've confirmed two things with whoever administers this
+project**:
+
+1. Is Cloud Run + Cloud SQL actually the intended deployment path for
+   this hackathon, or is there different infrastructure already set up
+   that you should be pointed at instead?
+2. If yes, request these roles (either for your own account, or
+   confirmation that `sa-np-hackathon52-000` will be used and who can
+   bind roles to it):
+   - `roles/run.admin` (deploy/manage Cloud Run services)
+   - `roles/cloudsql.admin` (create the Postgres instance)
+   - `roles/artifactregistry.admin` (create the image repo)
+   - `roles/iam.serviceAccountUser` on `sa-np-hackathon52-000` specifically
+     (needed to deploy Cloud Run *as* that account, without needing to
+     create a new one) — this is likely the smoother ask than requesting
+     `iam.serviceAccountAdmin` outright, since it doesn't grant broad
+     account-creation rights, just "let me deploy things that run as this
+     one already-existing account."
+
+Once that's confirmed, here's the plan, using the **existing**
+`sa-np-hackathon52-000` service account (not creating a new one) and the
+corrected `us-east4` region:
+
+### B0. One-time setup
 
 ```bash
 export PROJECT_ID="prj-spls-np-hackathon52-000"
-export REGION="us-central1"
+export REGION="us-east4"
 export SQL_INSTANCE="staples-pgvector"
 export DB_NAME="staples"
 export DB_USER="staples_app"
 export SERVICE_NAME="staples-visual-search"
 export AR_REPO="staples-repo"
-export SA_NAME="staples-run-sa"
-export SA_EMAIL="${SA_NAME}@${PROJECT_ID}.iam.gserviceaccount.com"
+export SA_EMAIL="sa-np-hackathon52-000@${PROJECT_ID}.iam.gserviceaccount.com"
 
 gcloud config set project "$PROJECT_ID"
 ```
 
-**If you open a new Cloud Shell tab later, re-run this export block first**
-— everything below assumes these variables are set in your current shell.
-
----
-
-## 1. Confirm access and billing
+### B1. Confirm the extra roles landed
 
 ```bash
-gcloud projects describe "$PROJECT_ID" --format="value(projectId,lifecycleState)"
-gcloud billing projects describe "$PROJECT_ID" --format="value(billingAccountName,billingEnabled)"
+gcloud projects get-iam-policy "$PROJECT_ID" > /tmp/iam-policy.yaml
+cat /tmp/iam-policy.yaml
 ```
 
-Expect `ACTIVE` and `billingEnabled: True`. If billing isn't enabled, stop
-here and get that sorted with whoever provisioned the project — nothing
-below will work without it, and a billing problem can produce confusing
-`503`/`API not enabled` errors that look like app bugs (this happened once
-already — see `GCP_SETUP.md`'s troubleshooting section for what that
-looked like).
+Look for `roles/run.admin`, a Cloud SQL role, and an Artifact Registry
+role bound to either your account/group or `sa-np-hackathon52-000`,
+depending on what was actually granted.
 
----
-
-## 2. Enable every API this app needs, up front
+### B2. Enable remaining APIs
 
 ```bash
 gcloud services enable \
@@ -66,59 +163,26 @@ gcloud services enable \
   sqladmin.googleapis.com \
   artifactregistry.googleapis.com \
   cloudbuild.googleapis.com \
-  secretmanager.googleapis.com \
-  compute.googleapis.com \
-  aiplatform.googleapis.com \
-  speech.googleapis.com
+  compute.googleapis.com
 ```
 
-`aiplatform` (Staples AI chat / Gemini) and `speech` (voice input) are
-included from the start this time — enabling them only when that feature
-breaks later is how the last project lost time on this.
+(`aiplatform` and `speech` already enabled in Part A.)
 
-Verify:
+### B3. Bind the remaining roles to the existing service account
 
-```bash
-gcloud services list --enabled --format="value(name)" | sort
-```
-
----
-
-## 3. Dedicated service account for Cloud Run (not the default compute one)
+Only run this if you were told YOU have permission to bind roles (not
+just enable APIs) — otherwise ask the admin to run this instead:
 
 ```bash
-gcloud iam service-accounts create "$SA_NAME" \
-  --display-name="Staples Visual Search — Cloud Run runtime"
-
-# Cloud SQL client — lets Cloud Run connect via the Unix-socket connector
 gcloud projects add-iam-policy-binding "$PROJECT_ID" \
   --member="serviceAccount:${SA_EMAIL}" \
   --role="roles/cloudsql.client"
-
-# Secret Manager accessor — lets Cloud Run read the DB password at deploy time
-gcloud projects add-iam-policy-binding "$PROJECT_ID" \
-  --member="serviceAccount:${SA_EMAIL}" \
-  --role="roles/secretmanager.secretAccessor"
-
-# Vertex AI (Staples AI chat / Gemini)
-gcloud projects add-iam-policy-binding "$PROJECT_ID" \
-  --member="serviceAccount:${SA_EMAIL}" \
-  --role="roles/aiplatform.user"
-
-# Cloud Speech-to-Text (voice input) -- roles/speech.editor is the
-# predefined role; if this errors, the exact error names the correct one.
-gcloud projects add-iam-policy-binding "$PROJECT_ID" \
-  --member="serviceAccount:${SA_EMAIL}" \
-  --role="roles/speech.editor"
 ```
 
-Doing all four IAM bindings now (not just Cloud SQL) means Cloud Run is
-deployed with the RIGHT service account from step 10 onward — no need to
-go back and re-bind roles after the fact like last time.
+(`secretmanager.secretAccessor` and `aiplatform.user` are already bound
+to this account per the policy dump we already pulled.)
 
----
-
-## 4. Provision Cloud SQL for Postgres (~10 min, real cost starts here)
+### B4. Provision Cloud SQL for Postgres (~10 min, real cost starts here)
 
 ```bash
 gcloud sql instances create "$SQL_INSTANCE" \
@@ -143,8 +207,7 @@ gcloud secrets add-iam-policy-binding staples-db-password \
   --role="roles/secretmanager.secretAccessor"
 ```
 
-For seeding the database in step 7 below, you'll need direct access
-(public IP + your Cloud Shell IP authorized):
+For seeding (step B7), direct access:
 
 ```bash
 gcloud sql instances patch "$SQL_INSTANCE" --assign-ip
@@ -159,14 +222,13 @@ echo "Connection name: $SQL_CONNECTION_NAME"
 echo "Public IP:        $SQL_PUBLIC_IP"
 ```
 
-**Cloud Shell's public IP is ephemeral** — if a later step suddenly gets a
-connection timeout after working fine earlier, re-run the `MY_IP` +
-`authorized-networks` lines above (check what's already authorized first
-with `gcloud sql instances describe "$SQL_INSTANCE" --format="value(settings.ipConfiguration.authorizedNetworks)"` since `--authorized-networks` REPLACES the whole list, it doesn't append).
+Cloud Shell's public IP is ephemeral — if a later step suddenly times out
+after working before, re-run the `MY_IP`/`authorized-networks` lines
+(check what's already authorized first with `gcloud sql instances
+describe "$SQL_INSTANCE" --format="value(settings.ipConfiguration.authorizedNetworks)"`
+since `--authorized-networks` REPLACES the whole list).
 
----
-
-## 5. Artifact Registry — where the built image lives
+### B5. Artifact Registry
 
 ```bash
 gcloud artifacts repositories create "$AR_REPO" \
@@ -175,57 +237,27 @@ gcloud artifacts repositories create "$AR_REPO" \
   --description="Staples Visual Search images"
 ```
 
----
-
-## 6. Get the code into Cloud Shell and stage it in GCS
+### B6. Get the code into Cloud Shell and stage it in GCS
 
 ```bash
 mkdir -p ~/staples-deploy && cd ~/staples-deploy
 git clone https://github.com/ravra001/staples-visual-search.git .
-```
 
-If the repo is private, either make it public (Settings → Danger Zone —
-fine for a hackathon repo) or clone with a token:
-`git clone https://<token>@github.com/ravra001/staples-visual-search.git .`
-
-Stage the source in GCS once — every later build references this instead
-of re-uploading:
-
-```bash
 gsutil mb -l "$REGION" "gs://${PROJECT_ID}-deploy-src" 2>/dev/null || true
 tar -czf /tmp/source.tar.gz --exclude='.git' .
 gsutil cp /tmp/source.tar.gz "gs://${PROJECT_ID}-deploy-src/staples-deploy-source.tar.gz"
 ```
 
-Budget several minutes for this first upload (the bundled CLIP model +
-product images make the source tree large). If it seems stuck, check
-`ps aux | grep gcloud` (still consuming CPU?) and
-`gsutil du -sh gs://${PROJECT_ID}-deploy-src/...` (still growing?) before
-assuming it's actually hung.
-
-**The CLIP model needs staging separately** — `backend/models/` is
-`.gitignore`'d (exceeds GitHub's 100MB limit), so a GitHub-checkout-based
-build (which is what the Cloud Build trigger in step 12 uses) won't have
-it unless it's fetched from GCS during the build. If you have the model
-files locally (from a working copy of this project), zip and stage them:
+**The CLIP model (`backend/models/hf/`) needs staging separately** — it's
+`.gitignore`'d (exceeds GitHub's 100MB limit). Zip it from a machine that
+has it populated and stage it:
 
 ```bash
-# From a machine that has backend/models/hf/ populated:
-#   cd backend/models && zip -r hf_model.zip hf/
-#   gsutil cp hf_model.zip gs://${PROJECT_ID}-deploy-src/model-cache/hf_model.zip
-# Then here in Cloud Shell, confirm it's there:
+# gsutil cp hf_model.zip gs://${PROJECT_ID}-deploy-src/model-cache/hf_model.zip
 gsutil ls -lh "gs://${PROJECT_ID}-deploy-src/model-cache/hf_model.zip"
 ```
 
-If that file doesn't exist yet, the manual build in step 8 (which builds
-from THIS Cloud Shell checkout, models included if you `git clone`d a repo
-that has them, or copied them in manually) works fine to get a first
-deploy live — just make sure `backend/models/hf/` actually has content
-before building, however you get it there.
-
----
-
-## 7. Seed the database
+### B7. Seed the database
 
 ```bash
 cd ~/staples-deploy/backend
@@ -241,19 +273,7 @@ r.init_and_seed(reuse_vectors_from='data/index_clip.npz')
 "
 ```
 
-Sanity-check:
-
-```bash
-python -c "
-import products_repo_sql as r
-print('categories:', r.get_categories())
-print('total:', r.count_by_category())
-"
-```
-
----
-
-## 8. Build and push the Docker image (first deploy — manual)
+### B8. Build and push the image
 
 ```bash
 cd ~/staples-deploy
@@ -263,9 +283,7 @@ gcloud builds submit "gs://${PROJECT_ID}-deploy-src/staples-deploy-source.tar.gz
   --tag "$IMAGE"
 ```
 
----
-
-## 9. Store the DB connection as a secret Cloud Run can read
+### B9. Store the DB connection as a secret
 
 ```bash
 export DB_PASSWORD=$(gcloud secrets versions access latest --secret=staples-db-password)
@@ -278,9 +296,7 @@ gcloud secrets add-iam-policy-binding staples-database-url \
   --role="roles/secretmanager.secretAccessor"
 ```
 
----
-
-## 10. Deploy to Cloud Run
+### B10. Deploy to Cloud Run
 
 ```bash
 gcloud run deploy "$SERVICE_NAME" \
@@ -289,7 +305,7 @@ gcloud run deploy "$SERVICE_NAME" \
   --service-account "$SA_EMAIL" \
   --add-cloudsql-instances "$SQL_CONNECTION_NAME" \
   --set-secrets "DATABASE_URL=staples-database-url:latest" \
-  --set-env-vars "GCP_PROJECT=${PROJECT_ID},EMBEDDING_BACKEND=clip,DATA_BACKEND=sql" \
+  --set-env-vars "GCP_PROJECT=${PROJECT_ID},GCP_LOCATION=us-east4,EMBEDDING_BACKEND=clip,DATA_BACKEND=sql" \
   --min-instances=1 \
   --max-instances=10 \
   --memory=4Gi \
@@ -301,30 +317,20 @@ gcloud run deploy "$SERVICE_NAME" \
 gcloud run services describe "$SERVICE_NAME" --region "$REGION" --format='value(status.url)'
 ```
 
-`GCP_PROJECT` is set explicitly here (unlike the original project, where
-it came from a Cloud Build substitution) since this is a manual first
-deploy — the `cloudbuild.yaml` trigger set up in step 12 will keep passing
-it on every future auto-deploy too.
+Note `GCP_LOCATION=us-east4` explicitly set — this project's Vertex AI
+access is in that region, not the `us-central1` default the app otherwise
+assumes.
 
----
-
-## 11. Verify
+### B11. Verify
 
 ```bash
 export URL=$(gcloud run services describe "$SERVICE_NAME" --region "$REGION" --format='value(status.url)')
-
 curl -s "$URL/api/config"
 curl -s "$URL/api/categories"
 curl -s -o /dev/null -w "products: %{time_total}s\n" "$URL/api/products"
 ```
 
-All should return in well under a second. If `/api/config` shows
-`"data_backend":"memory"` instead of `"sql"`, the `DATA_BACKEND` env var
-didn't take — check the deploy command above actually included it.
-
----
-
-## 12. Continuous deployment via GitHub
+### B12. Continuous deployment via GitHub
 
 ```bash
 export PROJECT_NUMBER=$(gcloud projects describe "$PROJECT_ID" --format='value(projectNumber)')
@@ -342,121 +348,47 @@ gsutil iam ch "serviceAccount:${CLOUDBUILD_SA}:objectViewer" \
   "gs://${PROJECT_ID}-deploy-src"
 ```
 
-**Connect the repo**: Cloud Console → Cloud Build → Triggers → Connect
-Repository → GitHub → authorize → select `staples-visual-search`. This
-step is a browser OAuth flow, no CLI path for it.
+Console → Cloud Build → Triggers → Connect Repository → GitHub → select
+`staples-visual-search`. Create trigger: push to `^main$`, configuration =
+**"Cloud Build configuration file"**, location `/cloudbuild.yaml`.
 
-**Create the trigger**: event = push to branch `^main$`, configuration =
-**"Cloud Build configuration file (YAML or JSON)"**, location =
-`/cloudbuild.yaml`.
-
-⚠️ **Do NOT pick "Autodetected" / "Dockerfile"** even though the console
-may suggest it first — that path ignores this repo's `cloudbuild.yaml`
-entirely and deploys through its own wizard instead: wrong region, the
-project's default Compute Engine service account (not the one set up in
-step 3), and none of the Cloud SQL/secrets/scaling flags from step 10. The
-result is a second, broken Cloud Run service that can never reach the
-database. Confirm which path a trigger is actually on with:
+⚠️ **Do NOT pick "Autodetected"/"Dockerfile"** — it bypasses
+`cloudbuild.yaml` and deploys a second, broken service with the wrong
+region/service-account/config. Confirm with
 `gcloud builds triggers list --format="table(name,filename)"` — an empty
-`filename` column means it's on the wrong (wizard) path.
+`filename` column means it's on the wrong path.
 
-You'll also need `cloudbuild.yaml`'s `_MODEL_BUCKET` substitution pointing
-at wherever you staged the zipped CLIP model (step 6) — set it in Cloud
-Build console → your trigger → Settings → Substitution variables, or edit
-the default in `cloudbuild.yaml` directly for this project.
+Set `cloudbuild.yaml`'s `_MODEL_BUCKET` substitution (Cloud Build console
+→ trigger → Settings) to wherever you staged the zipped model in B6, and
+add `GCP_LOCATION=us-east4` to the `--set-env-vars` line in
+`cloudbuild.yaml`'s deploy step (it currently only sets `GCP_PROJECT`).
 
-From then on, `git push origin main` is the entire deploy process.
+### B13. Product images via GCS + Cloud CDN (optional)
 
----
-
-## 13. Product images via GCS + Cloud CDN (optional, recommended)
-
-Frees the container's CPU/concurrency budget (shared with CLIP inference)
-from serving static image bytes.
-
-```bash
-export IMAGES_BUCKET="${PROJECT_ID}-product-images"
-
-gsutil mb -l "$REGION" "gs://${IMAGES_BUCKET}"
-gsutil uniformbucketlevelaccess set on "gs://${IMAGES_BUCKET}"
-gsutil iam ch allUsers:objectViewer "gs://${IMAGES_BUCKET}"
-
-cd ~/staples-deploy/backend/static/images/products
-gsutil -m -h "Cache-Control:public, max-age=604800" cp -r . "gs://${IMAGES_BUCKET}/products/"
-
-gcloud compute backend-buckets create staples-images-backend \
-  --gcs-bucket-name="$IMAGES_BUCKET" --enable-cdn
-
-gcloud compute addresses create staples-images-ip --global
-export LB_IP=$(gcloud compute addresses describe staples-images-ip --global --format='value(address)')
-export CDN_HOST="$(echo $LB_IP | tr '.' '-').sslip.io"
-
-gcloud compute ssl-certificates create staples-images-cert \
-  --domains="$CDN_HOST" --global
-
-gcloud compute url-maps create staples-images-lb \
-  --default-backend-bucket=staples-images-backend
-gcloud compute target-https-proxies create staples-images-https-proxy \
-  --url-map=staples-images-lb --ssl-certificates=staples-images-cert
-gcloud compute forwarding-rules create staples-images-https-rule \
-  --address=staples-images-ip --global \
-  --target-https-proxy=staples-images-https-proxy --ports=443
-```
-
-**The managed cert takes 15-60 min to provision.** Poll it:
-
-```bash
-gcloud compute ssl-certificates describe staples-images-cert \
-  --global --format='value(managed.status)'
-# PROVISIONING -> ACTIVE
-```
-
-Once `ACTIVE`, verify the CDN actually serves an image before cutting
-over:
-
-```bash
-curl -sI "https://${CDN_HOST}/products/$(gsutil ls gs://${IMAGES_BUCKET}/products/ | head -1 | xargs basename)"
-```
-
-Then set it CORS-enabled (needed for the homepage's sample-photo buttons)
-and point the service at it:
-
-```bash
-cat > /tmp/cors.json <<'CORSEOF'
-[{"origin": ["*"], "method": ["GET", "HEAD"], "responseHeader": ["Content-Type"], "maxAgeSeconds": 3600}]
-CORSEOF
-gsutil cors set /tmp/cors.json "gs://${IMAGES_BUCKET}"
-
-gcloud run services update "$SERVICE_NAME" --region "$REGION" \
-  --set-env-vars="IMAGES_BASE_URL=https://${CDN_HOST}"
-```
+Same as the general `GCP_SETUP.md` step 13 — not reproduced here since
+it's independent of the region/service-account issues above. See that
+file's step 13 when you get to it.
 
 ---
 
-## Quick reference: what to do if something breaks
+## Quick reference: what went wrong last time (so you recognize it faster)
 
+- **`Permission iam.serviceAccounts.create denied`** — your account has no
+  IAM-admin role on this project; the fix isn't a gcloud flag, it's asking
+  the project owner to grant a role (or use the existing service account
+  instead, per Part A/B above).
 - **Generic `503` / "service not available, try again in 30 seconds"** —
-  check billing is actually enabled AND propagated
-  (`gcloud billing projects describe "$PROJECT_ID"`), and that no APIs got
-  silently disabled (`gcloud services list --enabled` — cross-check
-  against the list in step 2). This happened once already and looked
-  exactly like an app bug until traced back to billing.
-- **`Failed to trigger build: ... requires billing to be enabled`** — same
-  cause as above, not a Cloud Build-specific problem.
-- **A GitHub push doesn't trigger a build at all** —
-  `gcloud builds triggers list` to confirm the trigger exists and isn't
-  disabled; `gcloud builds list --limit=5` to see if anything even
-  attempted to run.
-- **`torchvision::nms does not exist`** — torch/torchvision installed from
-  mismatched indexes; see the Dockerfile, they must install together from
-  the CPU-only PyTorch index in one command (already correct in this
-  repo's `Dockerfile` — only relevant if you've edited it).
-- **Voice input "unavailable"** — check Cloud Run's own logs for the real
-  traceback (`gcloud logging read 'resource.type=cloud_run_revision AND
+  on the previous project, this traced back to a billing hold silently
+  disabling APIs (including Cloud Build itself), independent of any app
+  bug. Check `gcloud billing projects describe "$PROJECT_ID"` and
+  `gcloud services list --enabled` first if this recurs.
+- **A GitHub push doesn't trigger a build** — `gcloud builds triggers
+  list` to confirm the trigger exists/isn't disabled;
+  `gcloud builds list --limit=5` to see if anything attempted to run.
+- **Voice input "unavailable"** — check Cloud Run's logs for the real
+  traceback (the browser only ever sees a generic message by design):
+  `gcloud logging read 'resource.type=cloud_run_revision AND
   resource.labels.service_name=staples-visual-search AND
   textPayload:"speech"' --limit=20 --freshness=1h
-  --format='value(textPayload)'`) — the browser only ever sees a generic
-  message by design.
-- **Everything else** — `GCP_SETUP.md`'s full Troubleshooting section has
-  more scenarios with exact error text from the first time this app was
-  deployed.
+  --format='value(textPayload)'`
+- **Everything else** — `GCP_SETUP.md`'s full Troubleshooting section.
