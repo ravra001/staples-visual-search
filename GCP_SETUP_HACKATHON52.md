@@ -36,6 +36,14 @@ hit that; skip straight to the ADC approach, which uses your own identity
 instead (already has `roles/aiplatform.admin` via the
 `gcp-sds-hackathon@staples.com` group).
 
+**No Postgres/Cloud SQL involved here at all.** `config.yaml` defaults to
+`data.backend: memory` — the 10k-product catalog loads into RAM from the
+local `data/catalog_abo.json` file already in the repo, no database
+required. Part A only needs Vertex AI + Speech-to-Text (both unblocked);
+Cloud SQL is purely a Part B (production deployment) concern, for when a
+real Cloud Run service needs a persistent store multiple instances can
+share instead of an in-process catalog.
+
 Steps 1-3 run in **Cloud Shell**; steps 4-9 run on the **machine that will
 actually run the app** (your laptop, a VM — wherever `python run.py` will
 execute). If that's the same machine you're doing Cloud Shell from, steps
