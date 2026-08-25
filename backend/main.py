@@ -34,7 +34,7 @@ from text_match import singularize
 from fastapi import FastAPI, File, HTTPException, Request, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse, RedirectResponse
+from fastapi.responses import FileResponse, RedirectResponse, Response
 from pydantic import BaseModel
 from starlette.concurrency import run_in_threadpool
 
@@ -1547,6 +1547,35 @@ async def agent_transcribe_ws(ws: WebSocket, sample_rate: int = 16000):
         # handler (and the worker thread) forever -- the thread is a daemon,
         # so worst case it's abandoned, not leaked as a zombie process.
         await run_in_threadpool(worker.join, 10)
+
+
+class AgentSpeakRequest(BaseModel):
+    text: str
+
+
+@app.post("/api/agent/speak")
+async def agent_speak(body: AgentSpeakRequest):
+    """Voice output for the Staples AI chat's per-reply speaker icon --
+    click-to-play, NOT auto-played (see speech.py's module docstring for
+    why). Text in, MP3 bytes out; the frontend plays it directly, nothing
+    is stored server-side. A max length guard for the same reason
+    /api/agent/chat has one on the inbound message -- this is also a
+    public, unauthenticated endpoint that spends real Cloud TTS cost per
+    call."""
+    if not config.VOICE_ENABLED:
+        raise HTTPException(503, "Voice output is disabled")
+    text = (body.text or "").strip()
+    if not text:
+        raise HTTPException(400, "text is required")
+    if len(text) > _AGENT_MAX_MESSAGE_CHARS:
+        raise HTTPException(400, f"text is too long (limit {_AGENT_MAX_MESSAGE_CHARS} characters)")
+
+    try:
+        audio_bytes = await run_in_threadpool(speech.synthesize, text)
+    except Exception:
+        print(f"[speech] /api/agent/speak failed:\n{traceback.format_exc()}", file=sys.stderr)
+        raise HTTPException(503, "Voice output is unavailable right now.")
+    return Response(content=audio_bytes, media_type="audio/mpeg")
 
 
 # ---------- static assets ----------

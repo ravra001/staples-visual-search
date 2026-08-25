@@ -100,6 +100,7 @@ const ICONS = {
   cart: `<svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M3 4h2l2.4 12.4a2 2 0 0 0 2 1.6h7.2a2 2 0 0 0 2-1.6L20 8H6"/><circle cx="9.5" cy="20.5" r="1.2"/><circle cx="17" cy="20.5" r="1.2"/></svg>`,
   chevron: `<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2"><polyline points="6 9 12 15 18 9"/></svg>`,
   mic: `<svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="9" y="2" width="6" height="12" rx="3"/><path d="M5 11a7 7 0 0 0 14 0"/><line x1="12" y1="18" x2="12" y2="22"/><line x1="8" y1="22" x2="16" y2="22"/></svg>`,
+  speaker: `<svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M4 9v6h4l5 4V5L8 9H4z"/><path d="M16.5 8.5a5 5 0 0 1 0 7"/><path d="M19 6a8.5 8.5 0 0 1 0 12"/></svg>`,
 };
 
 const FOOTER_COLUMNS = [
@@ -1815,7 +1816,10 @@ function _appendAgentMessage(role, html) {
 // button). Shared by the live send path and session-restore replay so a
 // restored bundle button still actually works, not just looks right.
 function _renderAgentReplyInto(div, data) {
-  let html = `<p>${esc(data.reply || "")}</p>`;
+  const reply = data.reply || "";
+  let html = reply
+    ? `<p>${esc(reply)} <button class="vs-agent-speak-btn" type="button" title="Listen" aria-label="Listen">${ICONS.speaker}</button></p>`
+    : "";
   if (data.degraded) {
     html += `<p class="vs-agent-degraded">Staples AI is unavailable right now — showing plain search results instead.</p>`;
   }
@@ -1852,6 +1856,47 @@ function _renderAgentReplyInto(div, data) {
       bundleBtn.disabled = true;
     });
   }
+
+  const speakBtn = div.querySelector(".vs-agent-speak-btn");
+  if (speakBtn) wireAgentSpeakButton(speakBtn, reply);
+}
+
+// Click-to-play TTS for one Staples AI reply -- NOT auto-played, see
+// backend/speech.py's module docstring for why. One fetch per click (no
+// caching): a chat reply is typically only played once, and caching audio
+// blobs across a whole conversation risks real memory growth for no
+// benefit here.
+function wireAgentSpeakButton(btn, text) {
+  let audio = null;
+  btn.addEventListener("click", async () => {
+    if (audio) {
+      // Already fetched once this click-cycle -- toggle play/pause instead
+      // of re-fetching.
+      if (audio.paused) audio.play(); else audio.pause();
+      return;
+    }
+    btn.disabled = true;
+    try {
+      const res = await fetch(`${API_BASE}/api/agent/speak`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ text }),
+      });
+      if (!res.ok) throw new Error(`speak failed (${res.status})`);
+      const blob = await res.blob();
+      audio = new Audio(URL.createObjectURL(blob));
+      audio.addEventListener("ended", () => { btn.classList.remove("speaking"); });
+      audio.addEventListener("play", () => { btn.classList.add("speaking"); });
+      audio.addEventListener("pause", () => { btn.classList.remove("speaking"); });
+      await audio.play();
+    } catch (e) {
+      console.error("Voice output failed:", e);
+      alert("Couldn't play that reply out loud — try again.");
+      audio = null;
+    } finally {
+      btn.disabled = false;
+    }
+  });
 }
 
 // Replays one persisted transcript entry (see sendAgentMessage) into the

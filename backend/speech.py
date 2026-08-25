@@ -1,24 +1,31 @@
 """
-Voice input — streaming speech-to-text for the Staples AI chat's mic button.
+Voice input/output — Cloud Speech-to-Text (mic) and Cloud Text-to-Speech
+(spoken replies) for the Staples AI chat.
 
-Google Cloud Speech-to-Text (speech.googleapis.com), same GCP project and
-credentials as Vertex AI (agent.py's Gemini calls, embeddings.py's vertex
-backend) -- a separate API to enable, not a separate project to configure.
-Deliberately NOT a locally-bundled model the way CLIP is: unlike CLIP (an
-embedding, needed on every search, worth the offline/zero-marginal-cost
-tradeoff), speech-to-text only runs on an explicit mic click, so the
-per-call cost and network dependency are much less consequential, and Cloud
-Speech-to-Text's accuracy on real speech is a genuine step up over a small
-locally-bundled model for a live demo.
+Same GCP project and credentials as Vertex AI (agent.py's Gemini calls,
+embeddings.py's vertex backend) for both directions -- separate APIs to
+enable, not separate projects to configure. Deliberately NOT locally-
+bundled models the way CLIP is: unlike CLIP (an embedding, needed on every
+search, worth the offline/zero-marginal-cost tradeoff), voice only runs on
+an explicit user action (a mic click, a speaker-icon click), so the
+per-call cost and network dependency are much less consequential, and
+Cloud's models are a genuine step up over small locally-bundled ones for a
+live demo.
 
-STREAMING, not one-shot: text appears as the user talks (interim results),
-not only after they stop -- see main.py's /ws/agent/transcribe. Text stops
-here either way: transcripts fill the existing chat input box, NOT
-auto-submitted -- transcription errors on shopping-specific terms (SKUs,
-brand names) are common enough that a quick glance before sending is worth
-the extra click.
+STREAMING input, not one-shot: text appears as the user talks (interim
+results), not only after they stop -- see main.py's /ws/agent/transcribe.
+Text stops here either way: transcripts fill the existing chat input box,
+NOT auto-submitted -- transcription errors on shopping-specific terms
+(SKUs, brand names) are common enough that a quick glance before sending
+is worth the extra click.
 
-AUDIO FORMAT: raw LINEAR16 PCM, not whatever container/codec
+Output is the opposite of streaming/automatic on purpose: click-to-play on
+a speaker icon per reply, not auto-played -- auto-playing audio on every
+reply (including ones the user typed, not spoke) risks feeling intrusive
+in a demo, and this is simpler to reason about than guessing whether a
+given turn "deserves" audio.
+
+INPUT AUDIO FORMAT: raw LINEAR16 PCM, not whatever container/codec
 MediaRecorder happens to produce. MediaRecorder's actual output format is
 browser-dependent (Chrome/Firefox default to webm/opus, Safari to mp4/aac,
 and Safari's webm support for MediaRecorder is unreliable even where it
@@ -145,3 +152,63 @@ def streaming_transcribe(sample_rate_hertz: int, chunk_queue: "queue.Queue", on_
     except Exception:
         print(f"[speech] streaming_transcribe failed:\n{traceback.format_exc()}", file=sys.stderr)
         raise
+
+
+# --------------------------------------------------------------------------
+# Voice OUTPUT -- Cloud Text-to-Speech for the chat's per-reply speaker icon
+# --------------------------------------------------------------------------
+
+_tts_state = {}
+_tts_load_lock = threading.Lock()
+
+
+def _get_tts_client():
+    """Lazy-load the Cloud Text-to-Speech client once per process -- same
+    lock + double-check pattern as _get_speech_client() above and
+    embeddings.py's _get_clip(), for the same reason."""
+    if _tts_state:
+        return _tts_state
+    with _tts_load_lock:
+        if _tts_state:
+            return _tts_state
+        try:
+            from google.cloud import texttospeech
+        except ImportError as e:  # pragma: no cover - depends on optional install
+            raise RuntimeError(
+                "Voice output requires google-cloud-texttospeech. Install it with: "
+                "pip install -r requirements-ml.txt"
+            ) from e
+        if not config.GCP_PROJECT:
+            raise RuntimeError(
+                "Voice output requires embedding.vertex.project in config.yaml (or GCP_PROJECT) "
+                "-- same project used for Vertex, just a different Google Cloud API."
+            )
+        _tts_state.update(client=texttospeech.TextToSpeechClient(), tts=texttospeech)
+        return _tts_state
+
+
+def synthesize(text: str) -> bytes:
+    """One reply's text -> MP3 audio bytes, for the chat's click-to-play
+    speaker icon. Synchronous single call (Cloud TTS has no meaningful
+    "streaming" mode for short text like a 2-3 sentence chat reply -- the
+    whole point of streaming STT was showing partial words while still
+    speaking; there's no equivalent benefit here, the audio has to be
+    fully synthesized before playback can start either way)."""
+    text = (text or "").strip()
+    if not text:
+        return b""
+    state = _get_tts_client()
+    client, tts = state["client"], state["tts"]
+
+    synthesis_input = tts.SynthesisInput(text=text)
+    voice = tts.VoiceSelectionParams(
+        language_code=config.VOICE_LANGUAGE,
+        ssml_gender=tts.SsmlVoiceGender.NEUTRAL,
+    )
+    audio_config = tts.AudioConfig(audio_encoding=tts.AudioEncoding.MP3)
+    try:
+        response = client.synthesize_speech(input=synthesis_input, voice=voice, audio_config=audio_config)
+    except Exception:
+        print(f"[speech] synthesize failed:\n{traceback.format_exc()}", file=sys.stderr)
+        raise
+    return response.audio_content
