@@ -1565,7 +1565,7 @@ let _agentLastItems = [];
 function _mergeAgentContext(oldItems, newItems) {
   const map = new Map(oldItems.map(it => [it.sku, it]));
   for (const it of newItems) map.set(it.sku, it);
-  return [...map.values()].slice(-12);
+  return [...map.values()].slice(-20);
 }
 
 // Photo attached to the NEXT message only -- {b64, mime, dataUrl} or null.

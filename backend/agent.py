@@ -77,7 +77,13 @@ matches, or invents products itself.
                            cheaper/nicer alternative in the SAME category,
                            same deterministic-math philosophy as the
                            bundling tools. Works on any item shown, not
-                           just ones from a bundle.
+                           just ones from a bundle. Also handles an already-
+                           picked specific replacement (new_sku, e.g. from a
+                           find_similar result) and, when the item being
+                           replaced was one of several in a confirmed order,
+                           reconstructing the WHOLE updated order (other_skus)
+                           so replacing one item doesn't silently drop the
+                           rest -- see this function's own docstring.
   find_similar            — "like that one but in black" / "the same rug
                            but under $150" for a known sku. Reuses the exact
                            same _do_similar_search machinery as the
@@ -109,7 +115,7 @@ import time
 import traceback
 
 import config
-from products_data import get_product_by_sku, get_products_by_category, get_deals, get_categories
+from products_data import get_product_by_sku, get_products_by_category, get_products_by_skus, get_deals, get_categories
 
 _agent_state = {}
 _agent_load_lock = threading.Lock()
@@ -222,8 +228,25 @@ def _load_agent_model():
             "a STYLE/COLOR change or gives an explicit price cap for one known item -- 'the same rug "
             "but in blue', 'like that chair but under $100' -- use find_similar (sku + refine_text and/"
             "or max_price) instead; swap_bundle_item only moves along price/quality, it can't match a "
-            "style or color change. Use compare_products when the user asks to compare 2-4 specific "
-            "known products, e.g. 'which of these is better' -- pass their skus from context."
+            "style or color change. This STILL applies even when the user doesn't explicitly say 'the "
+            "same X' -- e.g. 'everything is fine except the monitor stand, looking for a tall monitor "
+            "stand' is refining the monitor stand ALREADY shown (call find_similar with its sku from "
+            "context and refine_text 'tall'), not a request for a brand-new, unrelated search; if you "
+            "call search_products instead here, you'll search the whole catalog with no connection to "
+            "the item being replaced and can return completely unrelated results (verified: this failure "
+            "returned tables/desks for a monitor-stand request). "
+            "Once the user has SEEN find_similar's results and picks one -- 'use that one instead', "
+            "'the third one', 'replace it with the Jahnke desk' -- call swap_bundle_item again, but with "
+            "new_sku set to the one they picked (not direction). If the item being replaced was part of "
+            "a multi-item order the user already confirmed (a receipt reorder, a shopping list result) "
+            "and they want everything ELSE kept as-is -- e.g. 'everything is fine except the monitor "
+            "stand' -- also pass other_skus with the OTHER items' skus from context, so the result is "
+            "one complete updated order instead of losing the rest. Do NOT tell the user their whole "
+            "cart/order was replaced when they only asked to swap one item out of several -- that's "
+            "exactly the failure other_skus exists to prevent. "
+            "Use compare_products when the user asks "
+            "to compare 2-4 specific known products, e.g. 'which of these is better' -- pass their skus "
+            "from context."
     )
 
     last_err = None
@@ -385,15 +408,25 @@ def _swap_bundle_item_decl():
         description=(
             "Find a genuinely cheaper or nicer alternative to one specific product already known from "
             "this conversation (from context or a prior result), in the SAME category. Use when the "
-            "user pushes back on one item -- 'make the desk cheaper', 'a nicer chair'."
+            "user pushes back on one item -- 'make the desk cheaper', 'a nicer chair'. ALSO use this "
+            "(with new_sku set instead of direction) when the user has already picked a SPECIFIC "
+            "replacement -- e.g. after seeing find_similar results and saying 'use that one instead'. "
+            "If the item being replaced was part of a multi-item order (a receipt reorder, a shopping "
+            "list) and the user wants to keep the other items, pass their skus as other_skus so the "
+            "result is one complete updated bundle instead of losing them."
         ),
         parameters={
             "type": "object",
             "properties": {
-                "sku": {"type": "string", "description": "The SKU of the item to find an alternative to"},
-                "direction": {"type": "string", "enum": ["cheaper", "nicer"], "description": "Whether to find a cheaper or a higher-quality alternative"},
+                "sku": {"type": "string", "description": "The SKU of the item to replace"},
+                "direction": {"type": "string", "enum": ["cheaper", "nicer"], "description": "Whether to find a cheaper or a higher-quality alternative. Omit if new_sku is given."},
+                "new_sku": {"type": "string", "description": "An exact replacement SKU the user has already picked (e.g. from a find_similar result), instead of a generic cheaper/nicer direction."},
+                "other_skus": {
+                    "type": "array", "items": {"type": "string"},
+                    "description": "SKUs of the OTHER items from the same multi-item order that should stay unchanged, from context -- pass these when 'sku' was one item in a larger confirmed order and the user wants everything else kept as-is.",
+                },
             },
-            "required": ["sku", "direction"],
+            "required": ["sku"],
         },
     )
 
@@ -516,14 +549,17 @@ def trim_room_bundle_for_model(bundle):
 
 
 def trim_swap_for_model(result):
-    """Same reasoning again, for swap_bundle_item's old_item/new_item pair."""
+    """Same reasoning again, for swap_bundle_item's old_item/new_item pair
+    (and its optional reconstructed bundle, when other_skus was given)."""
     if not result:
         return result
-    out = {k: v for k, v in result.items() if k not in ("old_item", "new_item")}
+    out = {k: v for k, v in result.items() if k not in ("old_item", "new_item", "bundle")}
     for key in ("old_item", "new_item"):
         item = result.get(key)
         if item:
             out[key] = trim_items_for_model([item], cap=1)[0]
+    if result.get("bundle"):
+        out["bundle"] = trim_room_bundle_for_model(result["bundle"])
     return out
 
 
@@ -808,7 +844,7 @@ def _normalize_direction(direction):
     return "nicer"
 
 
-def swap_bundle_item(sku, direction):
+def swap_bundle_item(sku, direction=None, new_sku=None, other_skus=None):
     """"Make the desk cheaper" / "a nicer chair" -- for any item already
     known from this conversation, not just ones from a bundle. Deliberately
     stateless: no bundle/session needs to be tracked server-side, since the
@@ -823,40 +859,78 @@ def swap_bundle_item(sku, direction):
     for a $375 desk meant recommending a $20 desk as "nicer" purely because
     it had thousands more reviews at the same star rating. Only falls back
     to a cheaper-but-better item when nothing pricier is actually better.
+
+    new_sku: bypasses the cheaper/nicer search entirely -- the user has
+    already picked a SPECIFIC replacement (e.g. from a find_similar result)
+    rather than asking for a generic direction. direction is ignored when
+    this is given.
+
+    other_skus: the OTHER items from an existing multi-item order that
+    should stay unchanged (e.g. the rest of a receipt reorder bundle).
+    When given, the result includes a full reconstructed "bundle" (other
+    items + the replacement, with a real total) instead of just the single
+    swapped item -- this is what lets "everything's fine except the
+    monitor stand, replace it with X" produce one updated "Add all to
+    cart" bundle instead of losing the other confirmed items. Verified
+    bug this fixes: without this, the only way to act on a chosen
+    replacement was "replace the whole cart," dropping every other
+    already-confirmed item.
     """
-    direction = _normalize_direction(direction)
     current = get_product_by_sku((sku or "").strip())
     if not current:
         return {"feasible": False, "reason": "That item isn't from this conversation -- search for it first."}
-
     category = current["category"]
-    candidates = [p for p in get_products_by_category(category) if p["sku"] != current["sku"]]
-    if not candidates:
-        return {"feasible": False, "reason": f"No other {category} products available to compare.", "old_item": current}
 
-    if direction == "cheaper":
-        pool = [p for p in candidates if p["price"] < current["price"]]
-        if not pool:
-            return {"feasible": False, "reason": "This is already the cheapest option in its category.",
+    if new_sku:
+        new_item = get_product_by_sku(str(new_sku).strip())
+        if not new_item:
+            return {"feasible": False, "reason": "That replacement isn't from this conversation -- search for it first.",
                     "old_item": current, "category": category}
-        new_item = max(pool, key=_quality_score)
+        direction = None
     else:
-        current_score = _quality_score(current)
-        better = [p for p in candidates if _quality_score(p) > current_score]
-        if not better:
-            return {"feasible": False, "reason": "This is already one of the best-rated options in its category.",
-                    "old_item": current, "category": category}
-        upgrades = [p for p in better if p["price"] >= current["price"]]
-        # Cheapest genuine upgrade (same-or-higher price, better quality) if
-        # one exists; otherwise the single best-quality item overall is the
-        # honest answer even though it happens to cost less.
-        new_item = min(upgrades, key=lambda p: p["price"]) if upgrades else max(better, key=_quality_score)
+        direction = _normalize_direction(direction)
+        candidates = [p for p in get_products_by_category(category) if p["sku"] != current["sku"]]
+        if not candidates:
+            return {"feasible": False, "reason": f"No other {category} products available to compare.", "old_item": current}
 
-    return {
+        if direction == "cheaper":
+            pool = [p for p in candidates if p["price"] < current["price"]]
+            if not pool:
+                return {"feasible": False, "reason": "This is already the cheapest option in its category.",
+                        "old_item": current, "category": category}
+            new_item = max(pool, key=_quality_score)
+        else:
+            current_score = _quality_score(current)
+            better = [p for p in candidates if _quality_score(p) > current_score]
+            if not better:
+                return {"feasible": False, "reason": "This is already one of the best-rated options in its category.",
+                        "old_item": current, "category": category}
+            upgrades = [p for p in better if p["price"] >= current["price"]]
+            # Cheapest genuine upgrade (same-or-higher price, better quality) if
+            # one exists; otherwise the single best-quality item overall is the
+            # honest answer even though it happens to cost less.
+            new_item = min(upgrades, key=lambda p: p["price"]) if upgrades else max(better, key=_quality_score)
+
+    result = {
         "feasible": True, "category": category, "direction": direction,
         "old_item": current, "new_item": new_item,
         "price_delta": round(new_item["price"] - current["price"], 2),
     }
+
+    other_skus = [str(s).strip() for s in (other_skus or []) if s and str(s).strip() and str(s).strip() != current["sku"]]
+    if other_skus:
+        by_sku = get_products_by_skus(other_skus)
+        # Silently drop any sku that doesn't resolve (stale/invalid context
+        # reference) rather than failing the whole swap over it -- the
+        # items that DO resolve still form a valid, honest bundle.
+        other_items = [by_sku[s] for s in other_skus if s in by_sku]
+        bundle_items = other_items + [new_item]
+        result["bundle"] = {
+            "feasible": True,
+            "items": bundle_items,
+            "total": round(sum(p["price"] for p in bundle_items), 2),
+        }
+    return result
 
 
 def find_deals(category=None, min_discount_pct=None):

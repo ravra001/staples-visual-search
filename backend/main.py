@@ -1089,7 +1089,7 @@ def _build_screen_context(last_items):
     if not last_items:
         return ""
     lines = []
-    for it in last_items[:12]:
+    for it in last_items[:20]:
         if not isinstance(it, dict) or not it.get("sku"):
             continue
         name = str(it.get("name", ""))[:120]
@@ -1317,10 +1317,25 @@ def _do_agent_chat(message, history, last_items=None, image_bytes=None, image_mi
                 tool_result = {"acknowledged": True}
                 new_items = []
             elif name == "swap_bundle_item":
-                result = agent.swap_bundle_item(args.get("sku", ""), args.get("direction", ""))
+                result = agent.swap_bundle_item(
+                    args.get("sku", ""), args.get("direction", ""),
+                    new_sku=args.get("new_sku"), other_skus=args.get("other_skus"))
                 _serialize_bundle_items(result, "old_item", "new_item")
+                if result.get("bundle", {}).get("items"):
+                    result["bundle"]["items"] = [_serialize(p) for p in result["bundle"]["items"]]
                 tool_result = agent.trim_swap_for_model(result)
-                new_items = [result["new_item"]] if result.get("feasible") else []
+                if result.get("feasible") and result.get("bundle"):
+                    # other_skus was given -- a full reconstructed bundle (the
+                    # rest of the order + the replacement), not just one card.
+                    # Deliberately DOES set `bundle` here (unlike find_similar/
+                    # find_deals, which leave it untouched) -- this IS the
+                    # bundle-producing case, same as plan_room_setup/
+                    # match_shopping_list, just assembled from context instead
+                    # of built fresh.
+                    bundle = result["bundle"]
+                    new_items = list(bundle["items"])
+                else:
+                    new_items = [result["new_item"]] if result.get("feasible") else []
             elif name == "find_similar":
                 sku = str(args.get("sku", "")).strip()
                 refine_text = str(args.get("refine_text", "") or "").strip()
@@ -1434,7 +1449,13 @@ async def agent_chat(body: AgentChatRequest):
     # to balloon that cost (or just break generate_content on a request
     # that's grown too large) for a demo URL that ends up in a chat somewhere.
     history = (body.history or [])[-_AGENT_MAX_HISTORY_TURNS:]
-    last_items = (body.last_items or [])[:12]
+    # 20, not the original 12 -- a receipt/list bundle (up to ~8 items) plus
+    # a find_similar refinement (up to 8 more) on ONE of those items already
+    # totals 13+ in a single exchange; 12 let the oldest bundle item silently
+    # fall out of context before a later "replace X, keep the rest" request
+    # could reference it (verified: this exact sequence lost track of an
+    # item this way).
+    last_items = (body.last_items or [])[:20]
 
     try:
         return await run_in_threadpool(
