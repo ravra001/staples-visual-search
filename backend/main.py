@@ -1161,6 +1161,13 @@ def _do_agent_chat(message, history, last_items=None, image_bytes=None, image_mi
 
     state = agent._get_agent_model()
     model = state["model"]
+    # sku -> requested_qty, for swap_bundle_item's other_skus reconstruction
+    # below -- read from the client-resent last_items, not from anything
+    # Gemini is asked to recall and pass as a function argument.
+    qty_by_sku = {
+        it["sku"]: it["requested_qty"] for it in (last_items or [])
+        if isinstance(it, dict) and it.get("sku") and isinstance(it.get("requested_qty"), (int, float))
+    }
     prefixed_message = _build_screen_context(last_items) + message
     turn_parts = [Part.from_text(prefixed_message)] if prefixed_message else []
     if image_bytes:
@@ -1319,7 +1326,8 @@ def _do_agent_chat(message, history, last_items=None, image_bytes=None, image_mi
             elif name == "swap_bundle_item":
                 result = agent.swap_bundle_item(
                     args.get("sku", ""), args.get("direction", ""),
-                    new_sku=args.get("new_sku"), other_skus=args.get("other_skus"))
+                    new_sku=args.get("new_sku"), other_skus=args.get("other_skus"),
+                    qty_by_sku=qty_by_sku)
                 _serialize_bundle_items(result, "old_item", "new_item")
                 if result.get("bundle", {}).get("items"):
                     result["bundle"]["items"] = [_serialize(p) for p in result["bundle"]["items"]]
@@ -1492,10 +1500,11 @@ async def agent_chat(body: AgentChatRequest):
 # itself, just recorded here since it looked like an app bug at first.
 @app.websocket("/ws/agent/transcribe")
 async def agent_transcribe_ws(ws: WebSocket, sample_rate: int = 16000):
-    """Streaming voice input for the Staples AI chat's mic button -- text
-    appears as the user talks, not only after they stop (see speech.py's
-    module docstring for the full reasoning, including why this is raw
-    LINEAR16 PCM rather than whatever MediaRecorder happens to produce).
+    """Streaming voice input for the Staples AI chat's mic button (and
+    live-conversation mode) -- text appears as the user talks, not only
+    after they stop (see speech.py's module docstring for the full
+    reasoning, including why this is raw LINEAR16 PCM rather than whatever
+    MediaRecorder happens to produce).
 
     Protocol: client sends binary frames of raw PCM audio as they're
     captured, then a "STOP" text frame (or just disconnects -- handled the

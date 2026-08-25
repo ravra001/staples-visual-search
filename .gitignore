@@ -28,3 +28,7 @@ backend/.env.local.txt
 *.env.local
 *.env.local.txt
 .env*
+
+# Locally-generated cert bundle for GRPC TLS interception workaround (machine-specific)
+backend/windows_roots.pem
+backend/combined_roots.pem

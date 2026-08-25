@@ -1941,9 +1941,13 @@ async function sendAgentMessage(text, image = null) {
     _agentHistory.push({ role: "user", text: text || "[attached a photo]" });
     _agentHistory.push({ role: "model", text: data.reply || "" });
     // Merge this turn's items into the rolling context rather than
-    // replacing it -- see _mergeAgentContext.
+    // replacing it -- see _mergeAgentContext. requested_qty rides along
+    // (when present, e.g. from a receipt reorder) so a later swap_bundle_item
+    // call can rebuild the bundle at the ORIGINAL quantities instead of
+    // silently resetting everything to 1 -- see backend/main.py's
+    // _do_agent_chat, which reads this same field back out of last_items.
     _agentLastItems = _mergeAgentContext(_agentLastItems, (data.items || []).map(p => (
-      { sku: p.sku, name: p.name, price: p.price, category: p.category }
+      { sku: p.sku, name: p.name, price: p.price, category: p.category, requested_qty: p.requested_qty }
     )));
 
     _renderAgentReplyInto(pending, data);

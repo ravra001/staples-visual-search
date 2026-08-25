@@ -844,7 +844,7 @@ def _normalize_direction(direction):
     return "nicer"
 
 
-def swap_bundle_item(sku, direction=None, new_sku=None, other_skus=None):
+def swap_bundle_item(sku, direction=None, new_sku=None, other_skus=None, qty_by_sku=None):
     """"Make the desk cheaper" / "a nicer chair" -- for any item already
     known from this conversation, not just ones from a bundle. Deliberately
     stateless: no bundle/session needs to be tracked server-side, since the
@@ -875,6 +875,19 @@ def swap_bundle_item(sku, direction=None, new_sku=None, other_skus=None):
     bug this fixes: without this, the only way to act on a chosen
     replacement was "replace the whole cart," dropping every other
     already-confirmed item.
+
+    qty_by_sku: sku -> requested_qty for every currently-known item
+    (including the one being replaced), sourced by the caller (main.py's
+    _do_agent_chat) from last_items -- deterministic lookup, not something
+    Gemini is asked to recall and pass as a function argument (same "real
+    Python, not LLM math" reasoning as everything else here). The
+    replacement inherits the OLD item's quantity (falling back to 1 if
+    unknown) -- verified real usage: "replace the 5 monitor stands with a
+    taller one" means 5 taller ones, not 1. An initial version hardcoded
+    the replacement to qty 1 on the theory that a different product
+    shouldn't silently inherit "more of the same" -- wrong in practice,
+    since swap_bundle_item's replacements are near-always a same-category,
+    same-purpose stand-in (cheaper/nicer/taller/etc.), not an unrelated item.
     """
     current = get_product_by_sku((sku or "").strip())
     if not current:
@@ -920,15 +933,26 @@ def swap_bundle_item(sku, direction=None, new_sku=None, other_skus=None):
     other_skus = [str(s).strip() for s in (other_skus or []) if s and str(s).strip() and str(s).strip() != current["sku"]]
     if other_skus:
         by_sku = get_products_by_skus(other_skus)
+        qty_by_sku = qty_by_sku or {}
         # Silently drop any sku that doesn't resolve (stale/invalid context
         # reference) rather than failing the whole swap over it -- the
-        # items that DO resolve still form a valid, honest bundle.
-        other_items = [by_sku[s] for s in other_skus if s in by_sku]
-        bundle_items = other_items + [new_item]
+        # items that DO resolve still form a valid, honest bundle. Copy
+        # each item before tagging requested_qty -- by_sku's dicts are the
+        # same catalog objects other requests share, not per-call copies.
+        other_items = []
+        for s in other_skus:
+            if s not in by_sku:
+                continue
+            item = dict(by_sku[s])
+            item["requested_qty"] = qty_by_sku.get(s, 1)
+            other_items.append(item)
+        new_bundle_item = dict(new_item)
+        new_bundle_item["requested_qty"] = qty_by_sku.get(current["sku"], 1)
+        bundle_items = other_items + [new_bundle_item]
         result["bundle"] = {
             "feasible": True,
             "items": bundle_items,
-            "total": round(sum(p["price"] for p in bundle_items), 2),
+            "total": round(sum(p["price"] * p["requested_qty"] for p in bundle_items), 2),
         }
     return result
 
